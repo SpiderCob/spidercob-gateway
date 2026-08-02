@@ -1,0 +1,7 @@
+{
+  "listen": ":8080",
+  "nodes": [
+    { "name": "everything", "upstream_url": "http://localhost:3001" },
+    { "name": "jira", "upstream_url": "http://internal-jira-mcp:8000" }
+  ]
+}

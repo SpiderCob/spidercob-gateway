@@ -1,0 +1,55 @@
+{
+  "title": "Spidercob Gateway",
+  "uid": "spidercob-gw",
+  "tags": ["spidercob", "mcp", "security"],
+  "schemaVersion": 39,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "query": "prometheus" }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Request rate by MCP node",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (node) (rate(spidercob_requests_total[5m]))", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Scan verdicts (flag / redact / block)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (scanner, action) (rate(spidercob_scan_verdicts_total[5m]))", "legendFormat": "{{scanner}}/{{action}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "p95 proxied latency by node",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le, node) (rate(spidercob_upstream_duration_seconds_bucket[5m])))", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Non-2xx responses by node",
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (node) (rate(spidercob_requests_total{code!~\"2..\"}[5m]))", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Secrets redacted (24h)",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(increase(spidercob_scan_verdicts_total{action=\"redact\"}[24h]))", "refId": "A" }
+      ]
+    }
+  ]
+}

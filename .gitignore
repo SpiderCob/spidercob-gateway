@@ -1,0 +1,5 @@
+/spidercob
+config.json
+*.db
+dist/
+vectors/*.json

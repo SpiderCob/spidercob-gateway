@@ -1,0 +1,15 @@
+services:
+  gateway:
+    build:
+      context: ..
+    ports: ["8080:8080"]
+    volumes: ["../config.json:/config.json:ro"]
+
+  # Phase 0 interop harness (see ../interop/README.md)
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports: ["8081:8080"]
