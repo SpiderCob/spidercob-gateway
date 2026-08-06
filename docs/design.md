@@ -93,12 +93,13 @@ Three logical planes, one Go binary, one container:
 
 ## 4. Token & Session Design
 
-- **Access tokens:** JWTs signed EdDSA (Ed25519), 15–60 min TTL (configurable), **one token per MCP server** (`aud` = that server's canonical URI via RFC 8707). Never a single token valid at multiple MCPs — the v0.1 `allowed_mcps` map recreates the confused-deputy problem the MCP spec was revised to kill.
-- **Claims:** `iss` (gateway AS), `sub` (human user), `act` (agent client_id — preserved from the ID-JAG's actor chain), `aud` (target MCP), `scope` (see §5), `jti`, `exp`, `iat`.
-- **Revocation:** in-memory `jti` denylist (per-process map; Redis only in HA topologies), fed by admin UI "kill session" and by Spidercob threat signals in managed mode. Deny-list beats short TTL for incident response; both together are the design.
-- **Refresh:** standard `offline_access` refresh tokens for long-running agents; refresh re-evaluates policy so group changes take effect without waiting for expiry.
+- **Access tokens:** JWTs signed EdDSA (Ed25519), **one token per MCP server** (`aud` = that server's canonical URI via RFC 8707). Never a single token valid at multiple MCPs — the v0.1 `allowed_mcps` map recreates the confused-deputy problem the MCP spec was revised to kill.
+- **Default TTL: 120 seconds for NHI/agent tokens, 10 minutes for human tokens, both admin-configurable.** *(Updated 2026-08-06 — see `MASTER_PLAN.md` §6, 2026-08-04. Originally scoped as a 15–60 min range; short, mode-differentiated defaults are the actual design — NHI tokens get a much tighter window given higher automation/blast-radius risk.)*
+- **Claims:** `iss` (gateway AS), `sub` (human user or, for pure NHI calls, the agent's own identity), `act` (agent client_id — preserved from the ID-JAG's actor chain), `aud` (target MCP), `scope` (see §5), `jti`, `exp`, `iat`.
+- **Revocation:** in-memory `jti` denylist (per-process map; a shared store is a v1.1 HA item), fed by admin UI "kill session" and by Spidercob threat signals in managed mode. Deny-list beats short TTL for incident response; both together are the design.
+- **No separate refresh-token grant.** *(Updated 2026-08-06 — supersedes the `offline_access` refresh-token line originally here; see `MASTER_PLAN.md` §6, 2026-08-04.)* On expiry, each mode re-runs its own original exchange instead: NHI re-calls `/token` with the same `client_credentials` (standard practice — client_credentials grants don't typically issue refresh tokens anyway); Mode A humans silently re-mint via their still-valid local UI session; Mode B humans silently redo the RFC 8693+7523 exchange again — invisible to the user under EMA's zero-touch model, and this naturally keeps the IdP in the loop on every reissuance, which bounds deprovisioning staleness better than a long-lived refresh token would.
 - **Sender constraint (v1.1):** optional DPoP so a stolen bearer token is useless off-host.
-- **Static agent API keys exist only in Mode A** as the credential that bootstraps the internal token exchange (client_credentials-style). They never reach an MCP server and are hashed at rest (argon2id).
+- **NHI (agent) credentialing is decoupled from Mode A/B, not Mode-A-only.** *(Updated 2026-08-06 — see `MASTER_PLAN.md` §1, §6, 2026-08-04.)* Every NHI is a first-class principal with its own group membership (`agent_groups`), independent of Mode A/B, since an org fully on enterprise SSO for humans still needs a local, IdP-agnostic way to onboard a CI job or standing automation. Two credentialing tiers: (1) a static, hashed client secret + `client_credentials` grant for ephemeral/stateless NHIs that can't hold a key between runs (v1); (2) a locally-generated keypair enrolled the same way the gateway container itself enrolls, for long-running NHIs that can (v1.1, "secretless" — no long-lived shared secret ever transmitted). Tier-1 secrets never reach an MCP server and are hashed at rest (argon2id).
 
 ---
 
@@ -167,7 +168,7 @@ SQLite embedded (pure-Go driver, WAL mode) by default; Postgres behind the same 
 - `groups` / `user_groups` / `agent_groups`
 - `mcp_nodes` — id, name, canonical_uri, transport (streamable_http|sse|stdio), upstream_auth (none|service_token|passthrough), status, health
 - `tool_pins` — node_id, tool_name, schema_hash, description_hash, approved_at, approved_by
-- `policies` — id, group_id, node_id, allowed_methods[], allowed_tools[], param_constraints (json), sanitizer_profile_id
+- `policies` — id, group_id, node_id, **rule_type (allow|deny)**, allowed_methods[], allowed_tools[], param_constraints (json), **rate_limit (json, optional — max calls / window)**, sanitizer_profile_id. *(Updated 2026-08-06: explicit `rule_type` and `rate_limit` columns — the original allow-only table couldn't express deny-as-exception carve-outs or per-group/per-NHI quotas; evaluation order is deny-overrides-allow-overrides-default-deny, see `MASTER_PLAN.md` §6, 2026-08-04.)*
 - `sanitizer_profiles` — id, name, inbound_rules (json), outbound_rules (json)
 - `idp_trust` — issuer, jwks_uri, expected_aud, mode (Mode B federation config)
 - `revocations` — jti, reason, revoked_at (persisted; mirrored to memory)
@@ -285,7 +286,9 @@ spidercob/
 └── docs/                          # mkdocs — treat docs as a launch feature
 ```
 
-### 13.2 Build order (dependency-sorted, ~12 weeks to launch)
+### 13.2 Build order (dependency-sorted, originally ~12 weeks to launch)
+
+*(Note, 2026-08-06: real scope added since this estimate — full stdio process supervision with backoff/quarantine, dual Phase 2 interop targets (Keycloak **and** Okta, not just Keycloak), explicit ALLOW/DENY policy rules, rate limiting, scan-verdict-conditional policy actions, two-tier NHI credentialing — means 12 weeks should be treated as stale, not a target still holding. See `MASTER_PLAN.md` §7 open decisions.)*
 
 **Phase 0 — Validation & setup (weeks 0–2, part-time, before writing product code)**
 
@@ -330,7 +333,7 @@ spidercob/
 
 - **Spec-first prompting:** keep the conformance checklist and draft-04/EMA text in the repo (`docs/spec/`); point Claude at them in every auth-related session. LLMs confidently invent OAuth details — the checklist is the guardrail.
 - **Test harness as ratchet:** every interop bug becomes a permanent test against the Keycloak harness before it's fixed. Solo devs can't afford regressions.
-- Use Claude Code for the mechanical 70% (CRUD, UI screens, migrations, table-driven tests, docs) and reserve your own review depth for the four security-critical seams: token validation, policy evaluation, session mapping, redaction ordering. **Get one external security review of those seams before launch** — a paid freelance audit (~$3–5k) or a respected community reviewer; an auth product with a launch-week token bypass is dead.
+- Use Claude Code for the mechanical 70% (CRUD, UI screens, migrations, table-driven tests, docs) and reserve your own review depth for the **five** security-critical seams: token validation, **NHI credential issuance (`client_credentials`)**, policy evaluation, session mapping, redaction ordering. *(Updated 2026-08-06 — added the NHI seam; see `MASTER_PLAN.md` §6, 2026-08-04. The underlying token-signing code is shared with ID-JAG handling, but `client_credentials` authentication logic is distinct and shouldn't be assumed covered by testing the ID-JAG path alone.)* **Get one external security review of those seams before launch** — a paid freelance audit (~$3–5k) or a respected community reviewer; an auth product with a launch-week token bypass is dead.
 - Ruthless scope cuts already made: no HA, no Postgres, no SSO for the *admin UI*, no Mode C, no ML scanners at launch. Resist re-adding them.
 
 ---
