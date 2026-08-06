@@ -7,6 +7,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,42 +22,125 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
 	"github.com/sumeetgp/spidercob-gateway/internal/policy"
+	"github.com/sumeetgp/spidercob-gateway/internal/proxy/stdioadapter"
 	"github.com/sumeetgp/spidercob-gateway/internal/scan"
 )
 
 const maxBodyBytes = 10 << 20 // 10 MiB cap, part of the inbound sanitization story
 
+// closer is implemented by upstream node handlers that hold a resource
+// needing explicit teardown (a spawned stdio child process, today).
+// HTTP-backed nodes don't need it.
+type closer interface {
+	Close() error
+}
+
 type Gateway struct {
-	nodes    map[string]*httputil.ReverseProxy
+	nodes    map[string]http.Handler
+	closers  []closer
 	policy   policy.Engine
 	scanners *scan.Chain
 }
 
 func New(cfg *config.Config) (*Gateway, error) {
 	g := &Gateway{
-		nodes:    make(map[string]*httputil.ReverseProxy),
+		nodes:    make(map[string]http.Handler),
 		policy:   policy.AllowAll{}, // replaced in phase 3
 		scanners: scan.Default(),
 	}
 	for _, n := range cfg.Nodes {
-		u, err := url.Parse(n.UpstreamURL)
-		if err != nil {
-			return nil, fmt.Errorf("node %s: %w", n.Name, err)
-		}
 		name := n.Name
-		rp := &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.SetURL(u)
-				pr.SetXForwarded()
-				// Keep upstream responses uncompressed so they stay scannable.
-				pr.Out.Header.Del("Accept-Encoding")
-			},
-			ModifyResponse: g.scanResponse(name),
+		switch n.Transport {
+		case config.TransportStdio:
+			node, err := stdioadapter.New(context.Background(), name, n.Command, n.Args)
+			if err != nil {
+				return nil, fmt.Errorf("node %s: %w", name, err)
+			}
+			g.closers = append(g.closers, node)
+			g.nodes[name] = &scanningHandler{upstream: node, scanners: g.scanners, nodeName: name}
+		default: // config.TransportStreamableHTTP
+			u, err := url.Parse(n.UpstreamURL)
+			if err != nil {
+				return nil, fmt.Errorf("node %s: %w", name, err)
+			}
+			rp := &httputil.ReverseProxy{
+				Rewrite: func(pr *httputil.ProxyRequest) {
+					pr.SetURL(u)
+					pr.SetXForwarded()
+					// Keep upstream responses uncompressed so they stay scannable.
+					pr.Out.Header.Del("Accept-Encoding")
+				},
+				ModifyResponse: g.scanResponse(name),
+			}
+			g.nodes[name] = rp
 		}
-		g.nodes[name] = rp
 	}
 	return g, nil
 }
+
+// Close tears down every upstream resource the gateway holds directly --
+// today, spawned stdio child processes. Errors from individual closers are
+// joined so one failure doesn't hide another.
+func (g *Gateway) Close() error {
+	var errs []string
+	for _, c := range g.closers {
+		if err := c.Close(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(errs, "; "))
+}
+
+// scanningHandler wraps an upstream node handler that doesn't have its own
+// ModifyResponse-style hook (stdio nodes, unlike httputil.ReverseProxy) so
+// its responses still go through the same outbound DLP chain as HTTP-backed
+// nodes -- content inspection shouldn't depend on which transport a node
+// happens to use.
+type scanningHandler struct {
+	upstream http.Handler
+	scanners *scan.Chain
+	nodeName string
+}
+
+func (h *scanningHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	buf := newBufferedResponseWriter()
+	h.upstream.ServeHTTP(buf, r)
+
+	clean, verdicts := h.scanners.ScanResponse(buf.body.Bytes())
+	for _, v := range verdicts {
+		metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "response", h.nodeName)
+		slog.Warn("scan verdict",
+			"scanner", v.Scanner, "action", v.Action.String(),
+			"direction", "response", "node", h.nodeName, "detail", v.Detail)
+	}
+	for k, vv := range buf.header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Length", fmt.Sprint(len(clean)))
+	w.WriteHeader(buf.status)
+	_, _ = w.Write(clean)
+}
+
+// bufferedResponseWriter buffers a response in memory so it can be rewritten
+// (here, DLP-scanned) before being flushed to the real client.
+type bufferedResponseWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newBufferedResponseWriter() *bufferedResponseWriter {
+	return &bufferedResponseWriter{header: make(http.Header), status: http.StatusOK}
+}
+
+func (b *bufferedResponseWriter) Header() http.Header         { return b.header }
+func (b *bufferedResponseWriter) WriteHeader(code int)        { b.status = code }
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
 
 // statusRecorder captures the response code for metrics and passes Flush
 // through so SSE/streaming responses keep working.

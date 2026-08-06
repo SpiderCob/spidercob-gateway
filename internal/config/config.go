@@ -8,10 +8,19 @@ import (
 	"os"
 )
 
+// Transport identifies how the gateway reaches a node's upstream.
+const (
+	TransportStreamableHTTP = "streamable_http"
+	TransportStdio          = "stdio"
+)
+
 // Node is one upstream MCP server registered behind the gateway.
 type Node struct {
-	Name        string `json:"name"`
-	UpstreamURL string `json:"upstream_url"`
+	Name        string   `json:"name"`
+	Transport   string   `json:"transport,omitempty"` // TransportStreamableHTTP (default) or TransportStdio
+	UpstreamURL string   `json:"upstream_url,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
 }
 
 type Config struct {
@@ -31,10 +40,26 @@ func Load(path string) (*Config, error) {
 	if c.Listen == "" {
 		c.Listen = ":8080"
 	}
-	for _, n := range c.Nodes {
-		if n.Name == "" || n.UpstreamURL == "" {
-			return nil, fmt.Errorf("every node needs a name and upstream_url")
+	for i, n := range c.Nodes {
+		if n.Name == "" {
+			return nil, fmt.Errorf("every node needs a name")
 		}
+		if n.Transport == "" {
+			n.Transport = TransportStreamableHTTP
+		}
+		switch n.Transport {
+		case TransportStreamableHTTP:
+			if n.UpstreamURL == "" {
+				return nil, fmt.Errorf("node %s: streamable_http nodes need upstream_url", n.Name)
+			}
+		case TransportStdio:
+			if n.Command == "" {
+				return nil, fmt.Errorf("node %s: stdio nodes need command", n.Name)
+			}
+		default:
+			return nil, fmt.Errorf("node %s: unknown transport %q", n.Name, n.Transport)
+		}
+		c.Nodes[i] = n
 	}
 	return &c, nil
 }
