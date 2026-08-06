@@ -23,9 +23,15 @@ type Node struct {
 	Args        []string `json:"args,omitempty"`
 }
 
+// DefaultIdleSessionTimeoutSeconds is used when idle_session_timeout_seconds
+// is unset. Sessions with no activity for this long are torn down the same
+// way as an explicit DELETE (design doc decisions log, 2026-08-04).
+const DefaultIdleSessionTimeoutSeconds = 1800 // 30 minutes
+
 type Config struct {
-	Listen string `json:"listen"`
-	Nodes  []Node `json:"nodes"`
+	Listen                    string `json:"listen"`
+	IdleSessionTimeoutSeconds int    `json:"idle_session_timeout_seconds,omitempty"`
+	Nodes                     []Node `json:"nodes"`
 }
 
 func Load(path string) (*Config, error) {
@@ -39,6 +45,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Listen == "" {
 		c.Listen = ":8080"
+	}
+	if c.IdleSessionTimeoutSeconds <= 0 {
+		c.IdleSessionTimeoutSeconds = DefaultIdleSessionTimeoutSeconds
 	}
 	for i, n := range c.Nodes {
 		if n.Name == "" {

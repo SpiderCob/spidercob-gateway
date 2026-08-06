@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -24,11 +25,19 @@ import (
 type Node struct {
 	name    string
 	session *mcp.ClientSession
+
+	dead atomic.Bool
 }
 
 // New spawns command as a stdio MCP server and connects to it. The child
 // process and connection are kept alive for the lifetime of the Node --
 // call Close to terminate it.
+//
+// A background watcher detects the connection ending for any reason
+// (orderly Close, or the child process crashing on its own) and flips
+// Alive() to false -- letting callers distinguish "in-flight session
+// whose process just died" from a live one, rather than only finding out
+// the hard way on the next failed call.
 func New(ctx context.Context, name, command string, args []string) (*Node, error) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "spidercob-gateway", Version: "0.1.0"}, nil)
 	transport := &mcp.CommandTransport{Command: exec.Command(command, args...)}
@@ -36,8 +45,18 @@ func New(ctx context.Context, name, command string, args []string) (*Node, error
 	if err != nil {
 		return nil, fmt.Errorf("stdioadapter %s: connect: %w", name, err)
 	}
-	return &Node{name: name, session: session}, nil
+	n := &Node{name: name, session: session}
+	go func() {
+		_ = session.Wait() // returns once the connection ends, for any reason
+		n.dead.Store(true)
+	}()
+	return n, nil
 }
+
+// Alive reports whether the underlying process/connection is still active.
+// Becomes false once the process exits, whether via an orderly Close or an
+// unexpected crash.
+func (n *Node) Alive() bool { return !n.dead.Load() }
 
 // Close terminates the underlying child process.
 func (n *Node) Close() error { return n.session.Close() }

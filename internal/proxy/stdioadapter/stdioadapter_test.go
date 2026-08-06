@@ -108,6 +108,34 @@ func TestNode_ToolsCall(t *testing.T) {
 	}
 }
 
+// TestNode_AliveBecomesFalseOnUnexpectedCrash uses the real crashserver
+// fixture, which completes initialize normally then exits on its own
+// shortly after -- proving Alive() detects a real, unexpected process
+// death, not just an orderly Close().
+func TestNode_AliveBecomesFalseOnUnexpectedCrash(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	n, err := New(ctx, "crash", "go", []string{"run", "./testdata/crashserver"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer n.Close()
+
+	if !n.Alive() {
+		t.Fatal("expected the node to be alive immediately after a successful connect")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !n.Alive() {
+			return // success: crash was detected
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected Alive() to become false after the fixture's unexpected exit")
+}
+
 func TestNode_UnknownMethod(t *testing.T) {
 	n := newTestNode(t)
 
