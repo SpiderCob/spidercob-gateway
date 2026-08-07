@@ -1,17 +1,19 @@
 // Package store abstracts persistence. SQLite (modernc.org/sqlite, no cgo)
 // is the phase-2 implementation; Postgres arrives with HA (design doc §8).
 //
-// Scope as of Phase 3a (issue #7): users, agents (NHI), groups,
+// Scope as of Phase 3b (issue #9): users, agents (NHI), groups,
 // user_groups, agent_groups, revocations (issue #3), external_identities
-// (JIT-provisioned Mode B users, issue #5), and now policies (issue #7).
-// Trusted external-IdP config (idp_trust in design doc §8) stays
-// config-file-only, same bootstrap pattern as SeedAgents -- no admin API
-// exists yet to justify persisting it; policies is a table (not
-// config-only) because the evaluator needs a real query surface
-// (PoliciesForGroups) on the hot path, not just a one-time bootstrap read.
-// The remaining Phase 3+ tables (mcp_nodes, tool_pins, sanitizer_profiles,
-// audit_log) are still out of scope here and land with the phases that
-// need them.
+// (JIT-provisioned Mode B users, issue #5), policies (issue #7), and now
+// tool_pins (issue #9). Trusted external-IdP config (idp_trust in design
+// doc §8) stays config-file-only, same bootstrap pattern as SeedAgents --
+// no admin API exists yet to justify persisting it; policies and
+// tool_pins are tables (not config-only) because both need a real query
+// surface on the hot path (PoliciesForGroups, GetToolPin), not just a
+// one-time bootstrap read -- and tool_pins specifically must survive a
+// restart unchanged (TOFU only applies to a genuinely new (node, tool)
+// pair) or the whole pinning defense is trivially bypassable. The
+// remaining Phase 3+ tables (mcp_nodes, sanitizer_profiles, audit_log)
+// are still out of scope here and land with the phases that need them.
 package store
 
 import (
@@ -109,6 +111,21 @@ type NewPolicy struct {
 	BlockOnScanFlag        bool
 }
 
+// ToolPin is one tool's trust-on-first-observation baseline (issue #9):
+// Hash covers name+description+inputSchema together, computed by
+// internal/pin. QuarantinedAt is nil until a refresh observes a hash that
+// no longer matches -- there is no re-approval mechanism in this phase,
+// so once set it stays set until a human edits the store directly.
+type ToolPin struct {
+	ID            int64
+	Node          string
+	ToolName      string
+	Hash          string
+	PinnedAt      time.Time
+	QuarantinedAt *time.Time
+	DriftDetail   *string
+}
+
 // Revocation is one denylisted access-token jti, persisted so the
 // authserver's in-memory denylist survives a gateway restart.
 type Revocation struct {
@@ -169,6 +186,26 @@ type Store interface {
 	// PoliciesForGroups returns every policy rule attached to any of
 	// groupIDs, scoped to node -- the evaluator's hot-path query.
 	PoliciesForGroups(ctx context.Context, groupIDs []int64, node string) ([]Policy, error)
+
+	// GetToolPin looks up one (node, tool_name) pin. Returns ErrNotFound
+	// if this tool has never been observed for this node -- the caller
+	// (internal/pin) treats that as "TOFU: establish a new pin," not an
+	// error.
+	GetToolPin(ctx context.Context, node, toolName string) (ToolPin, error)
+	// CreateToolPin establishes a new pin (TOFU) with no quarantine.
+	// Returns ErrConflict if a pin for this (node, tool_name) already
+	// exists -- the caller should treat that as a logic error (TOFU only
+	// ever applies once per tool), not something to silently overwrite.
+	CreateToolPin(ctx context.Context, node, toolName, hash string) (ToolPin, error)
+	// QuarantineToolPin marks an existing pin as drifted, persisting
+	// driftDetail for later investigation (story 12). Idempotent: calling
+	// it again just updates the detail/timestamp, it doesn't error on an
+	// already-quarantined pin.
+	QuarantineToolPin(ctx context.Context, node, toolName, driftDetail string) error
+	// ToolPinsForNode returns every pin for node, for building a
+	// quarantine set once per tools/list filter call rather than querying
+	// per tool name.
+	ToolPinsForNode(ctx context.Context, node string) ([]ToolPin, error)
 
 	// RevokeJTI denylists a token's jti until expiresAt (its own natural
 	// expiry -- no point keeping a revocation past the point the token

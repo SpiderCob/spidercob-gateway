@@ -13,3 +13,5 @@ echo
 "$script_dir/run-e2e-auth.sh"
 echo
 "$script_dir/run-e2e-policy.sh"
+echo
+"$script_dir/run-e2e-pin.sh"

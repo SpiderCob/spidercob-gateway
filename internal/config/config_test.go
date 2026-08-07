@@ -73,6 +73,35 @@ func TestLoad_IdentityDefaultsApplied(t *testing.T) {
 	if cfg.LocalSessionTTLSeconds != DefaultLocalSessionTTLSeconds {
 		t.Fatalf("LocalSessionTTLSeconds = %d, want %d", cfg.LocalSessionTTLSeconds, DefaultLocalSessionTTLSeconds)
 	}
+	if cfg.PinRefreshIntervalSeconds != DefaultPinRefreshIntervalSeconds {
+		t.Fatalf("PinRefreshIntervalSeconds = %d, want %d", cfg.PinRefreshIntervalSeconds, DefaultPinRefreshIntervalSeconds)
+	}
+	if cfg.PinCheckIntervalSeconds != DefaultPinCheckIntervalSeconds {
+		t.Fatalf("PinCheckIntervalSeconds = %d, want %d", cfg.PinCheckIntervalSeconds, DefaultPinCheckIntervalSeconds)
+	}
+}
+
+func TestLoad_PinRefreshIntervalOverridesApplied(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[
+		{"name":"jira","upstream_url":"http://localhost:3001","pin_refresh_interval_seconds":60},
+		{"name":"slack","upstream_url":"http://localhost:3002"}
+	],"pin_refresh_interval_seconds":900,"pin_check_interval_seconds":5}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PinRefreshIntervalSeconds != 900 {
+		t.Fatalf("config-level PinRefreshIntervalSeconds = %d, want 900", cfg.PinRefreshIntervalSeconds)
+	}
+	if cfg.PinCheckIntervalSeconds != 5 {
+		t.Fatalf("PinCheckIntervalSeconds = %d, want 5", cfg.PinCheckIntervalSeconds)
+	}
+	if cfg.Nodes[0].PinRefreshIntervalSeconds != 60 {
+		t.Fatalf("jira's node-level override = %d, want 60", cfg.Nodes[0].PinRefreshIntervalSeconds)
+	}
+	if cfg.Nodes[1].PinRefreshIntervalSeconds != 0 {
+		t.Fatalf("slack's node-level override = %d, want 0 (unset, falls back to config-level default)", cfg.Nodes[1].PinRefreshIntervalSeconds)
+	}
 }
 
 func TestLoad_SeedAgentRequiresAllFields(t *testing.T) {

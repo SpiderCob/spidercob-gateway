@@ -391,6 +391,67 @@ func nonNilStrings(s []string) []string {
 	return s
 }
 
+func (s *SQLiteStore) GetToolPin(ctx context.Context, node, toolName string) (ToolPin, error) {
+	var p ToolPin
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, node, tool_name, hash, pinned_at, quarantined_at, drift_detail
+		 FROM tool_pins WHERE node = ? AND tool_name = ?`, node, toolName,
+	).Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ToolPin{}, ErrNotFound
+	}
+	return p, err
+}
+
+func (s *SQLiteStore) CreateToolPin(ctx context.Context, node, toolName, hash string) (ToolPin, error) {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO tool_pins (node, tool_name, hash) VALUES (?, ?, ?)`, node, toolName, hash)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return ToolPin{}, ErrConflict
+		}
+		return ToolPin{}, err
+	}
+	return s.GetToolPin(ctx, node, toolName)
+}
+
+func (s *SQLiteStore) QuarantineToolPin(ctx context.Context, node, toolName, driftDetail string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tool_pins SET quarantined_at = CURRENT_TIMESTAMP, drift_detail = ?
+		 WHERE node = ? AND tool_name = ?`, driftDetail, node, toolName)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ToolPinsForNode(ctx context.Context, node string) ([]ToolPin, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, node, tool_name, hash, pinned_at, quarantined_at, drift_detail
+		 FROM tool_pins WHERE node = ?`, node)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ToolPin
+	for rows.Next() {
+		var p ToolPin
+		if err := rows.Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // isUniqueConstraint reports whether err came from a UNIQUE constraint
 // violation. modernc.org/sqlite doesn't export a typed error for this, so
 // this falls back to matching the driver's message text.

@@ -116,7 +116,7 @@ Group-based, default-deny, evaluated at token issuance *and* re-checked per requ
 
 **Implementation:** start with a simple deterministic evaluator over normalized policy rows (SQLite). Design the interface so **Cedar (cedar-go)** can be swapped in for v1.1 — Cedar gives you auditable, analyzable policies without shipping a Rego runtime. Scopes encode coarse policy into the token (`mcp:jira:tools:get_jira_ticket`), fine policy stays server-side.
 
-**Tool pinning (rug-pull defense):** on MCP node registration, snapshot `tools/list` and hash each tool's name+description+inputSchema. If an upstream server later changes a tool definition, the gateway quarantines the tool (blocked + admin alert) until re-approved. Malicious tool-description mutation is a top real-world MCP attack; checkbox-cheap to defend at registration time.
+**Tool pinning (rug-pull defense):** the first time the gateway observes a node's `tools/list` (TOFU — trust on first observation, not an admin-approval step at registration time, since no approval mechanism exists yet), it snapshots and hashes each tool's name+description+inputSchema as the trusted baseline. A periodic background refresh (admin-configurable interval per node, never on the request hot path) re-fetches and compares; a tool whose hash no longer matches is quarantined per-tool (blocked via `tools/call`, hidden from `tools/list`) — logged with enough detail to investigate, but with no re-approval mechanism yet (Phase 4; the "admin alert" half is also still unbuilt — no notification channel exists). Malicious tool-description mutation is a top real-world MCP attack; checkbox-cheap to defend once a baseline exists. *(Updated 2026-08-07 — implemented, issue #9; see `MASTER_PLAN.md` §6, 2026-08-07.)*
 
 ---
 
@@ -167,7 +167,7 @@ SQLite embedded (pure-Go driver, WAL mode) by default; Postgres behind the same 
 - `agents` — id, owner_user_id, name, client_id, api_key_hash, status *(agents are first-class principals, separate from humans — required for `act` chaining)*
 - `groups` / `user_groups` / `agent_groups`
 - `mcp_nodes` — id, name, canonical_uri, transport (streamable_http|sse|stdio), upstream_auth (none|service_token|passthrough), status, health
-- `tool_pins` — node_id, tool_name, schema_hash, description_hash, approved_at, approved_by
+- `tool_pins` — node (config-defined name, not a `mcp_nodes` foreign key — no such table is persisted yet), tool_name, hash, pinned_at, quarantined_at (nullable), drift_detail (nullable). *(Updated 2026-08-07: one combined hash over name+description+inputSchema, not separate `schema_hash`/`description_hash` columns — simpler to reason about and equally effective at catching a change to any of the three; TOFU-established (`pinned_at`) rather than admin-`approved_by`, since no approval flow exists yet — see `MASTER_PLAN.md` §6, 2026-08-07, and issue #9.)*
 - `policies` — id, group_id, node_id, **rule_type (allow|deny)**, allowed_methods[], allowed_tools[], param_constraints (json), **rate_limit (json, optional — max calls / window)**, sanitizer_profile_id. *(Updated 2026-08-06: explicit `rule_type` and `rate_limit` columns — the original allow-only table couldn't express deny-as-exception carve-outs or per-group/per-NHI quotas; evaluation order is deny-overrides-allow-overrides-default-deny, see `MASTER_PLAN.md` §6, 2026-08-04.)*
 - `sanitizer_profiles` — id, name, inbound_rules (json), outbound_rules (json)
 - `idp_trust` — issuer, jwks_uri, expected_aud, mode (Mode B federation config)

@@ -14,6 +14,7 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/idptrust"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
+	"github.com/sumeetgp/spidercob-gateway/internal/pin"
 	"github.com/sumeetgp/spidercob-gateway/internal/policy"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
@@ -178,6 +179,32 @@ func main() {
 		// to also be present.
 		gw.SetPolicy(policy.NewEvaluator(db))
 	}
+
+	// Tool pinning (issue #9): always wired in, independent of
+	// DevAllowAllPolicy -- that flag exists to bypass the authorization
+	// question ("who may call what"), pinning answers a different one
+	// ("is the tool still what it was when it was first observed"), and
+	// automation/run-e2e.sh needs both a permissive policy AND working
+	// drift detection to actually exercise this feature end-to-end.
+	pinRegistry := pin.NewRegistry(db)
+	gw.SetPinRegistry(pinRegistry)
+
+	pinIntervals := make(map[string]time.Duration, len(cfg.Nodes))
+	for _, n := range cfg.Nodes {
+		if n.PinRefreshIntervalSeconds > 0 {
+			pinIntervals[n.Name] = time.Duration(n.PinRefreshIntervalSeconds) * time.Second
+		}
+	}
+	pinScheduler := pin.NewScheduler(pin.SchedulerConfig{
+		Registry:        pinRegistry,
+		Fetch:           gw.FetchToolsForPin,
+		Nodes:           nodeNames,
+		Intervals:       pinIntervals,
+		DefaultInterval: time.Duration(cfg.PinRefreshIntervalSeconds) * time.Second,
+		CheckInterval:   time.Duration(cfg.PinCheckIntervalSeconds) * time.Second,
+	})
+	pinScheduler.Start()
+	defer pinScheduler.Stop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
