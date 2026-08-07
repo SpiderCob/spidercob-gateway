@@ -16,7 +16,10 @@ Open-source, self-hosted MCP gateway: spec-correct agent identity (ID-JAG / MCP 
 
 ## Next up
 
-**Phase 2: identity & tokens.** Per `MASTER_PLAN.md` §3 — `internal/identity` (local users, argon2id, NHI `client_credentials`), `internal/authserver` (Ed25519/JWKS with multi-key support, `/token` for the internal exchange and NHI, RFC 9728 metadata, `jti` revocation), wiring the Keycloak interop harness for real ID-JAGs via RFC 7523, and setting up the free Okta Developer account during this phase (not deferred to launch). No spec has been written for this yet — that's the first step, same `/to-spec` process used for issue #1.
+**Phase 2 is split into two issues (2026-08-07), not bundled like Phase 1 was** — Keycloak/Okta interop needs real external services (Docker, a live IdP), a different test-infrastructure shape than the self-contained identity/authserver core. See `MASTER_PLAN.md` §3 Phase 2 for the full reasoning.
+
+- **[Issue #3](https://github.com/SpiderCob/spidercob-gateway/issues/3) — Phase 2a: identity & authserver core (Mode A + NHI, no external IdP) — spec published, ready to implement.** Covers a real `internal/store` SQLite implementation (currently just a `Ping()` stub — a previously-unstated prerequisite this issue makes explicit), `internal/identity`, `internal/authserver` (`/token`, JWKS with multi-key support, RFC 9728 metadata, `jti` revocation), and flipping `policy.AllowAll{}` → `policy.DenyAll{}`. Same TDD/branch/`make ci`/PR workflow as issue #1. **This is the next thing to actually build.**
+- **Phase 2b — not yet spec'd, gated on issue #3 merging.** Keycloak RFC 7523 interop, the free Okta Developer account setup, JIT provisioning for externally-authenticated users. Run `/to-spec` for this once 2a is done, same process used for #3.
 
 ## How to use this file
 
