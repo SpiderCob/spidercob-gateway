@@ -36,9 +36,10 @@ func (a realAuthAdapter) ValidateAccessToken(node, token string) (AuthClaims, er
 // end-to-end by minting a real token via the authserver seam and
 // presenting it to the gateway.
 type authTestEnv struct {
-	gw  *Gateway
-	as  *authserver.AuthServer
-	svc *identity.Service
+	gw    *Gateway
+	as    *authserver.AuthServer
+	svc   *identity.Service
+	store store.Store
 }
 
 func newAuthTestEnv(t *testing.T, upstreamURL, nodeName string) *authTestEnv {
@@ -78,7 +79,7 @@ func newAuthTestEnv(t *testing.T, upstreamURL, nodeName string) *authTestEnv {
 		}
 	})
 
-	return &authTestEnv{gw: gw, as: as, svc: svc}
+	return &authTestEnv{gw: gw, as: as, svc: svc, store: s}
 }
 
 // mintToken drives the real HTTP /token endpoint (client_credentials, a

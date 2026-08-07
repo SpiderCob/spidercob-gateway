@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -216,6 +217,17 @@ func (s *SQLiteStore) CreateGroup(ctx context.Context, name string) (Group, erro
 	return Group{ID: id, Name: name}, nil
 }
 
+func (s *SQLiteStore) GetGroupByName(ctx context.Context, name string) (Group, error) {
+	var g Group
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name FROM groups WHERE name = ?`, name,
+	).Scan(&g.ID, &g.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, ErrNotFound
+	}
+	return g, err
+}
+
 func (s *SQLiteStore) AssignUserGroup(ctx context.Context, userID, groupID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)`, userID, groupID)
@@ -293,6 +305,90 @@ func (s *SQLiteStore) LoadRevocations(ctx context.Context) ([]Revocation, error)
 		revs = append(revs, r)
 	}
 	return revs, rows.Err()
+}
+
+// ReplacePolicies runs inside one transaction: delete every existing
+// policy row, then insert the given set. Config is the sole source of
+// policy truth in this phase -- see the Store interface's doc comment for
+// why full replacement, not diffing, is the right idempotency strategy
+// here specifically (unlike identity data).
+func (s *SQLiteStore) ReplacePolicies(ctx context.Context, policies []NewPolicy) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM policies`); err != nil {
+		return fmt.Errorf("clear policies: %w", err)
+	}
+	for _, p := range policies {
+		methodsJSON, err := json.Marshal(nonNilStrings(p.Methods))
+		if err != nil {
+			return fmt.Errorf("marshal methods: %w", err)
+		}
+		toolsJSON, err := json.Marshal(nonNilStrings(p.Tools))
+		if err != nil {
+			return fmt.Errorf("marshal tools: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO policies (group_id, node, rule_type, methods, tools, rate_limit_max_calls, rate_limit_window_seconds, block_on_scan_flag)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			p.GroupID, p.Node, string(p.RuleType), string(methodsJSON), string(toolsJSON),
+			p.RateLimitMaxCalls, p.RateLimitWindowSeconds, p.BlockOnScanFlag,
+		); err != nil {
+			return fmt.Errorf("insert policy for group %d node %q: %w", p.GroupID, p.Node, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) PoliciesForGroups(ctx context.Context, groupIDs []int64, node string) ([]Policy, error) {
+	if len(groupIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(groupIDs))
+	args := make([]any, 0, len(groupIDs)+1)
+	for i, id := range groupIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, node)
+
+	query := fmt.Sprintf(
+		`SELECT id, group_id, node, rule_type, methods, tools, rate_limit_max_calls, rate_limit_window_seconds, block_on_scan_flag, created_at
+		 FROM policies WHERE group_id IN (%s) AND node = ?`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Policy
+	for rows.Next() {
+		var p Policy
+		var ruleType, methodsJSON, toolsJSON string
+		if err := rows.Scan(&p.ID, &p.GroupID, &p.Node, &ruleType, &methodsJSON, &toolsJSON,
+			&p.RateLimitMaxCalls, &p.RateLimitWindowSeconds, &p.BlockOnScanFlag, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		p.RuleType = PolicyRuleType(ruleType)
+		if err := json.Unmarshal([]byte(methodsJSON), &p.Methods); err != nil {
+			return nil, fmt.Errorf("unmarshal methods for policy %d: %w", p.ID, err)
+		}
+		if err := json.Unmarshal([]byte(toolsJSON), &p.Tools); err != nil {
+			return nil, fmt.Errorf("unmarshal tools for policy %d: %w", p.ID, err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // isUniqueConstraint reports whether err came from a UNIQUE constraint

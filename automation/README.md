@@ -30,8 +30,25 @@ instead of something re-typed by hand each time.
   config-seeded NHI credential (`config.SeedAgents`) since there's no admin
   API yet (Phase 4) to register one over HTTP.
 
-- **`run-all.sh`** — all three, in order. This is the one command to run
-  before opening a PR.
+- **`run-e2e-policy.sh`** — issue #7's policy engine, against the real
+  compiled binary with a real `config.Policies` bootstrap: a principal
+  with no group at all gets 403 even on `initialize` (no special-casing);
+  a server-level grant lets a real tool call actually succeed end-to-end
+  (the first time any e2e script in this repo reaches a real 200 on a
+  policy-gated call, not just a 403 proving auth alone); a method-scoped
+  grant allows `tools/list` but denies `tools/call`; a rate-limited group's
+  second call gets 429, distinct from 403. Not part of `make ci-interop`
+  — no Docker needed, runs in `make ci`.
+
+- **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
+  needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
+  7523/8693 flow against a real Keycloak container, realm/client/user
+  setup scripted via Keycloak's own Admin REST API. See `interop/README.md`
+  for what this proves and the real interop quirks it found.
+
+- **`run-all.sh`** — every Docker-free script above, in order. This is the
+  one command to run before opening a PR. `make ci-interop` is a separate,
+  required-but-Docker-gated layer — see `interop/README.md`.
 
 ## Extending this as new issues land
 

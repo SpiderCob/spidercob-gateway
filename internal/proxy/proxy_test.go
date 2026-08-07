@@ -113,6 +113,20 @@ func (f *fakeUpstreamServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if req.Method == "tools/list" {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"tools": []map[string]any{
+					{"name": "search_issues", "description": "search"},
+					{"name": "delete_issue", "description": "delete"},
+					{"name": "create_issue", "description": "create"},
+				},
+				"nextCursor": "page-2",
+			},
+		})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"jsonrpc": "2.0", "id": req.ID,
 		"result": map[string]any{"echo": req.Method},

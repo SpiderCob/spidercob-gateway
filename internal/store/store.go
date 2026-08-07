@@ -1,14 +1,17 @@
 // Package store abstracts persistence. SQLite (modernc.org/sqlite, no cgo)
 // is the phase-2 implementation; Postgres arrives with HA (design doc §8).
 //
-// Scope as of Phase 2b (issue #5): users, agents (NHI), groups,
-// user_groups, agent_groups, revocations (issue #3), plus
-// external_identities (JIT-provisioned Mode B users, issue #5). Trusted
-// external-IdP config (idp_trust in design doc §8) is config-file-only for
-// now, not a table -- same bootstrap pattern as SeedAgents, no admin API
-// exists yet to justify persisting it. The Phase 3+ tables (mcp_nodes,
-// tool_pins, policies, sanitizer_profiles, audit_log) are out of scope
-// here and land with the phases that need them.
+// Scope as of Phase 3a (issue #7): users, agents (NHI), groups,
+// user_groups, agent_groups, revocations (issue #3), external_identities
+// (JIT-provisioned Mode B users, issue #5), and now policies (issue #7).
+// Trusted external-IdP config (idp_trust in design doc §8) stays
+// config-file-only, same bootstrap pattern as SeedAgents -- no admin API
+// exists yet to justify persisting it; policies is a table (not
+// config-only) because the evaluator needs a real query surface
+// (PoliciesForGroups) on the hot path, not just a one-time bootstrap read.
+// The remaining Phase 3+ tables (mcp_nodes, tool_pins, sanitizer_profiles,
+// audit_log) are still out of scope here and land with the phases that
+// need them.
 package store
 
 import (
@@ -64,6 +67,48 @@ type ExternalIdentity struct {
 	CreatedAt time.Time
 }
 
+// PolicyRuleType distinguishes an ALLOW rule from a DENY rule -- Phase 3a's
+// evaluator is explicitly not allow-only (design doc §5, MASTER_PLAN.md §6
+// 2026-08-04): DENY rules express carve-outs without enumerating every
+// other tool individually, and always win over a matching ALLOW.
+type PolicyRuleType string
+
+const (
+	PolicyAllow PolicyRuleType = "allow"
+	PolicyDeny  PolicyRuleType = "deny"
+)
+
+// Policy is one rule: principals in GroupID may (ALLOW) or may not (DENY)
+// reach Node, restricted to Methods (empty = every method) and, only when
+// Methods includes "tools/call", to Tools (empty = every tool). RateLimit*
+// and BlockOnScanFlag are only consulted for ALLOW rules -- see
+// internal/policy's evaluator for exactly how.
+type Policy struct {
+	ID                     int64
+	GroupID                int64
+	Node                   string
+	RuleType               PolicyRuleType
+	Methods                []string
+	Tools                  []string
+	RateLimitMaxCalls      *int
+	RateLimitWindowSeconds *int
+	BlockOnScanFlag        bool
+	CreatedAt              time.Time
+}
+
+// NewPolicy is the input shape for ReplacePolicies -- the same fields as
+// Policy minus ID/CreatedAt, which the store assigns.
+type NewPolicy struct {
+	GroupID                int64
+	Node                   string
+	RuleType               PolicyRuleType
+	Methods                []string
+	Tools                  []string
+	RateLimitMaxCalls      *int
+	RateLimitWindowSeconds *int
+	BlockOnScanFlag        bool
+}
+
 // Revocation is one denylisted access-token jti, persisted so the
 // authserver's in-memory denylist survives a gateway restart.
 type Revocation struct {
@@ -102,10 +147,28 @@ type Store interface {
 	ResolveOrCreateExternalUser(ctx context.Context, issuer, subject, newUsername, newPasswordHash string) (user User, created bool, err error)
 
 	CreateGroup(ctx context.Context, name string) (Group, error)
+	// GetGroupByName looks up a group by its unique name -- the
+	// get-or-create bootstrap path (config-declared SeedAgents.Groups and
+	// Policies, issue #7) needs this to resolve an already-existing group
+	// after CreateGroup returns ErrConflict.
+	GetGroupByName(ctx context.Context, name string) (Group, error)
 	AssignUserGroup(ctx context.Context, userID, groupID int64) error
 	AssignAgentGroup(ctx context.Context, agentID, groupID int64) error
 	UserGroups(ctx context.Context, userID int64) ([]Group, error)
 	AgentGroups(ctx context.Context, agentID int64) ([]Group, error)
+
+	// ReplacePolicies atomically replaces the entire policies table with
+	// the given set. Config is the sole source of policy truth in this
+	// phase (no admin API exists yet, issue #7) -- unlike identity data
+	// (users/agents, which must never be silently regenerated on
+	// restart), policy has no independent state of its own beyond config,
+	// so treating config as the complete desired state and reapplying it
+	// fresh on every startup is simpler and safer than diffing or
+	// accumulating stale rules across restarts.
+	ReplacePolicies(ctx context.Context, policies []NewPolicy) error
+	// PoliciesForGroups returns every policy rule attached to any of
+	// groupIDs, scoped to node -- the evaluator's hot-path query.
+	PoliciesForGroups(ctx context.Context, groupIDs []int64, node string) ([]Policy, error)
 
 	// RevokeJTI denylists a token's jti until expiresAt (its own natural
 	// expiry -- no point keeping a revocation past the point the token

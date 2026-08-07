@@ -90,6 +90,18 @@ type Config struct {
 	// grant is rejected and RFC 9728 metadata never advertises id-jag
 	// support.
 	TrustedIdPs []TrustedIdP `json:"trusted_idps,omitempty"`
+
+	// Policies declares the real access-control rules (issue #7) --
+	// config-file bootstrap, same posture as SeedAgents/TrustedIdPs (no
+	// admin API yet). Unlike SeedAgents (create-if-missing, since
+	// credentials must never be silently regenerated), Policies fully
+	// REPLACES whatever's in the store's policies table on every startup:
+	// policy has no independent state of its own beyond config in this
+	// phase, so config is the complete desired state, not a set of
+	// increments. Absent or empty means every request is denied
+	// (policy.DenyAll{}'s effective behavior even with the real evaluator
+	// wired in -- no groups have any rules).
+	Policies []PolicyRule `json:"policies,omitempty"`
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See
@@ -98,6 +110,47 @@ type SeedAgent struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	Name         string `json:"name"`
+	// Groups assigns this agent to the named groups at startup
+	// (auto-creating any that don't already exist) -- issue #7's
+	// bootstrap path for exercising an authorized NHI policy path from
+	// automation, the same reason SeedAgents itself exists. No equivalent
+	// mechanism exists for human (Mode A) users in this phase.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// PolicyRule is one config-declared access-control rule. See
+// Config.Policies.
+type PolicyRule struct {
+	// Group is a name -- auto-created if it doesn't already exist.
+	Group string `json:"group"`
+	// Node must match a registered node's name. There is still no
+	// persisted mcp_nodes table (design doc §8) -- policy references
+	// nodes by their config-defined name, same posture as SeedAgents/
+	// TrustedIdPs deferring real admin-managed resource registration.
+	Node string `json:"node"`
+	// RuleType is "allow" or "deny". An explicit deny always overrides a
+	// matching allow, across every group a principal belongs to
+	// (MASTER_PLAN.md §6, 2026-08-04).
+	RuleType string `json:"rule_type"`
+	// Methods restricts which JSON-RPC methods this rule covers,
+	// including "initialize" -- there's no special-casing, a group needs
+	// an explicit grant to even start a session. Empty means every
+	// method.
+	Methods []string `json:"methods,omitempty"`
+	// Tools restricts which tool names this rule covers, only meaningful
+	// when Methods includes "tools/call". Empty means every tool.
+	Tools []string `json:"tools,omitempty"`
+	// RateLimitMaxCalls and RateLimitWindowSeconds, if both set, cap how
+	// many calls this rule's group/node combination may make in a
+	// rolling window -- defense-in-depth, in-memory, per-process only
+	// (not durable, not shared across replicas).
+	RateLimitMaxCalls      *int `json:"rate_limit_max_calls,omitempty"`
+	RateLimitWindowSeconds *int `json:"rate_limit_window_seconds,omitempty"`
+	// BlockOnScanFlag escalates any non-clean verdict from the existing
+	// request-scan pipeline (e.g. the injection heuristics, which
+	// otherwise only log) to an actual block, for calls this rule
+	// allows.
+	BlockOnScanFlag bool `json:"block_on_scan_flag,omitempty"`
 }
 
 // TrustedIdP is one externally-trusted IdP an ID-JAG may come from. See
@@ -175,6 +228,17 @@ func Load(path string) (*Config, error) {
 	for _, t := range c.TrustedIdPs {
 		if t.Issuer == "" || t.JWKSURL == "" || t.ExpectedAudience == "" {
 			return nil, fmt.Errorf("trusted_idps entries need issuer, jwks_url, and expected_audience")
+		}
+	}
+	for _, p := range c.Policies {
+		if p.Group == "" || p.Node == "" {
+			return nil, fmt.Errorf("policies entries need group and node")
+		}
+		if p.RuleType != "allow" && p.RuleType != "deny" {
+			return nil, fmt.Errorf("policies entry for group %q node %q: rule_type must be \"allow\" or \"deny\", got %q", p.Group, p.Node, p.RuleType)
+		}
+		if (p.RateLimitMaxCalls == nil) != (p.RateLimitWindowSeconds == nil) {
+			return nil, fmt.Errorf("policies entry for group %q node %q: rate_limit_max_calls and rate_limit_window_seconds must be set together", p.Group, p.Node)
 		}
 	}
 	return &c, nil
