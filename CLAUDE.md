@@ -15,9 +15,9 @@ Every issue goes through this sequence — TDD and real end-to-end validation be
 1. **Branch per issue**: `issue-<n>-<short-slug>` off `main` (e.g. `issue-1-session-mapping`).
 2. **TDD**: write the tests first, per the seams agreed in the issue's spec. Tests fail (red) before any implementation exists.
 3. **Implement** until those tests pass (green).
-4. **Real end-to-end validation, not just unit tests.** If the issue touches MCP traffic, spin up a real MCP server (not a mock) — the reference `@modelcontextprotocol/server-everything` server, or whatever's appropriate for the issue — and drive the actual flow through the gateway end-to-end. If the flow needs isolation (to avoid clobbering other test state), stand up a throwaway sandbox (docker-compose stack, temp dir, whatever fits) rather than running it against shared state.
-5. **Only after the e2e flow is demonstrated working** does a PR go up — don't open the PR before this step passes.
-6. **Merge only after the PR's checks and the e2e validation are both green.**
+4. **Real end-to-end validation, not just unit tests.** If the issue touches MCP traffic, spin up a real MCP server (not a mock) — the reference `@modelcontextprotocol/server-everything` server, or whatever's appropriate for the issue — and drive the actual flow through the gateway end-to-end. If the flow needs isolation (to avoid clobbering other test state), stand up a throwaway sandbox (docker-compose stack, temp dir, whatever fits) rather than running it against shared state. `automation/` is where these checks live as real, runnable scripts (`make ci` runs all of them) — extend it with a new `run-e2e-<flow>.sh` per issue rather than validating by hand each time; see `automation/README.md`.
+5. **Only after `make ci` is green** does a PR go up — don't open the PR before this step passes.
+6. **Merge only after the PR's checks and `make ci` are both green.**
 7. **After merge**, update `CONTEXT.md` on the `context_main` branch (below) with what just landed and what's next, and push it, before starting the next issue.
 
 ## Session continuity: the `context_main` branch
