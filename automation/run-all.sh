@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The one command: fast unit/integration suite, then the real end-to-end
+# smoke test against the compiled binary. Run this before opening a PR --
+# it's the concrete realization of the CLAUDE.md workflow's "tests green,
+# then validated end-to-end, then a PR goes up" rule.
+set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+"$script_dir/run-tests.sh"
+echo
+"$script_dir/run-e2e.sh"
