@@ -26,4 +26,6 @@ Every issue goes through this sequence — TDD and real end-to-end validation be
 
 **To read it at the start of a session**: `git fetch origin && git show origin/context_main:CONTEXT.md`.
 
+**Use the `handoff` skill** (`.claude/skills/handoff/`) both to close out a session cleanly (verifies nothing's uncommitted, updates and pushes `CONTEXT.md`, states the exact read path back) and to orient at the start of one — it's the concrete, repeatable procedure for both directions, not just this prose description.
+
 **To update it** (after every issue merges): checkout `context_main`, overwrite `CONTEXT.md`, commit, push. Keep it short — current state and what's next, not a duplicate of `MASTER_PLAN.md`/`docs/design.md`. Point to those for full detail rather than copying them.
