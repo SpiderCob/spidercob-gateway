@@ -210,6 +210,96 @@ func TestExternalIdentityResolveOrCreate_ConcurrentFirstLoginNoDuplicate(t *test
 
 func intPtr(i int) *int { return &i }
 
+func TestToolPin_CreateGetQuarantine(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.GetToolPin(ctx, "jira", "search_issues"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetToolPin (unpinned) = %v, want ErrNotFound", err)
+	}
+
+	pin, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v1")
+	if err != nil {
+		t.Fatalf("CreateToolPin: %v", err)
+	}
+	if pin.Node != "jira" || pin.ToolName != "search_issues" || pin.Hash != "hash-v1" {
+		t.Fatalf("unexpected pin: %+v", pin)
+	}
+	if pin.QuarantinedAt != nil {
+		t.Fatalf("expected a freshly-established pin to not be quarantined, got %+v", pin.QuarantinedAt)
+	}
+	if pin.PinnedAt.IsZero() {
+		t.Fatalf("expected PinnedAt to be set")
+	}
+
+	got, err := s.GetToolPin(ctx, "jira", "search_issues")
+	if err != nil {
+		t.Fatalf("GetToolPin: %v", err)
+	}
+	if got != pin {
+		t.Fatalf("GetToolPin = %+v, want %+v", got, pin)
+	}
+
+	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v2"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate CreateToolPin = %v, want ErrConflict", err)
+	}
+
+	if err := s.QuarantineToolPin(ctx, "jira", "search_issues", "hash changed from hash-v1 to hash-v2"); err != nil {
+		t.Fatalf("QuarantineToolPin: %v", err)
+	}
+	quarantined, err := s.GetToolPin(ctx, "jira", "search_issues")
+	if err != nil {
+		t.Fatalf("GetToolPin (after quarantine): %v", err)
+	}
+	if quarantined.QuarantinedAt == nil {
+		t.Fatalf("expected QuarantinedAt to be set")
+	}
+	if quarantined.DriftDetail == nil || *quarantined.DriftDetail != "hash changed from hash-v1 to hash-v2" {
+		t.Fatalf("DriftDetail = %v, want the drift detail string", quarantined.DriftDetail)
+	}
+
+	// Idempotent: quarantining an already-quarantined pin again just
+	// updates the detail, it doesn't error.
+	if err := s.QuarantineToolPin(ctx, "jira", "search_issues", "second drift"); err != nil {
+		t.Fatalf("QuarantineToolPin (again): %v", err)
+	}
+
+	if err := s.QuarantineToolPin(ctx, "jira", "never-pinned-tool", "n/a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("QuarantineToolPin (never pinned) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestToolPinsForNode(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "h1"); err != nil {
+		t.Fatalf("CreateToolPin: %v", err)
+	}
+	if _, err := s.CreateToolPin(ctx, "jira", "create_issue", "h2"); err != nil {
+		t.Fatalf("CreateToolPin: %v", err)
+	}
+	if _, err := s.CreateToolPin(ctx, "postgres-ro", "query", "h3"); err != nil {
+		t.Fatalf("CreateToolPin: %v", err)
+	}
+
+	pins, err := s.ToolPinsForNode(ctx, "jira")
+	if err != nil {
+		t.Fatalf("ToolPinsForNode: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("ToolPinsForNode(jira) = %+v, want 2 pins", pins)
+	}
+
+	empty, err := s.ToolPinsForNode(ctx, "unknown-node")
+	if err != nil {
+		t.Fatalf("ToolPinsForNode (unknown node): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("ToolPinsForNode(unknown-node) = %+v, want none", empty)
+	}
+}
+
 func TestReplacePoliciesAndPoliciesForGroups(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

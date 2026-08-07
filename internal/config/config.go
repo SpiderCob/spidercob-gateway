@@ -21,6 +21,11 @@ type Node struct {
 	UpstreamURL string   `json:"upstream_url,omitempty"`
 	Command     string   `json:"command,omitempty"`
 	Args        []string `json:"args,omitempty"`
+	// PinRefreshIntervalSeconds overrides Config.PinRefreshIntervalSeconds
+	// for this node only (issue #9 story 5: a slow-changing internal tool
+	// and a frequently-updated third-party server can have different
+	// staleness tolerances). Zero means "use the config-level default."
+	PinRefreshIntervalSeconds int `json:"pin_refresh_interval_seconds,omitempty"`
 }
 
 // DefaultIdleSessionTimeoutSeconds is used when idle_session_timeout_seconds
@@ -43,6 +48,16 @@ const (
 	// DefaultStoreDBPath is where the identity SQLite database lives when
 	// store_db_path isn't set.
 	DefaultStoreDBPath = "spidercob.db"
+	// DefaultPinRefreshIntervalSeconds is how often each node's tools are
+	// re-fetched and drift-checked (issue #9) when neither a node-level
+	// nor config-level override is set.
+	DefaultPinRefreshIntervalSeconds = 300 // 5 minutes
+	// DefaultPinCheckIntervalSeconds is how often the background
+	// scheduler wakes up to see whether *any* node is due -- independent
+	// of, and normally much shorter than, any individual node's own
+	// refresh interval (mirrors idleReapInterval's role for the
+	// idle-session reaper).
+	DefaultPinCheckIntervalSeconds = 10
 )
 
 type Config struct {
@@ -102,6 +117,17 @@ type Config struct {
 	// (policy.DenyAll{}'s effective behavior even with the real evaluator
 	// wired in -- no groups have any rules).
 	Policies []PolicyRule `json:"policies,omitempty"`
+
+	// PinRefreshIntervalSeconds is the default tool-pin drift-check
+	// interval (issue #9) for any node that doesn't set its own
+	// pin_refresh_interval_seconds. Falls back to
+	// DefaultPinRefreshIntervalSeconds when unset.
+	PinRefreshIntervalSeconds int `json:"pin_refresh_interval_seconds,omitempty"`
+	// PinCheckIntervalSeconds is how often the background pin scheduler
+	// wakes up to check whether any node is due for a refresh. Falls back
+	// to DefaultPinCheckIntervalSeconds when unset; unrelated to, and
+	// normally much shorter than, PinRefreshIntervalSeconds itself.
+	PinCheckIntervalSeconds int `json:"pin_check_interval_seconds,omitempty"`
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See
@@ -198,6 +224,12 @@ func Load(path string) (*Config, error) {
 	}
 	if c.LocalSessionTTLSeconds <= 0 {
 		c.LocalSessionTTLSeconds = DefaultLocalSessionTTLSeconds
+	}
+	if c.PinRefreshIntervalSeconds <= 0 {
+		c.PinRefreshIntervalSeconds = DefaultPinRefreshIntervalSeconds
+	}
+	if c.PinCheckIntervalSeconds <= 0 {
+		c.PinCheckIntervalSeconds = DefaultPinCheckIntervalSeconds
 	}
 	for i, n := range c.Nodes {
 		if n.Name == "" {

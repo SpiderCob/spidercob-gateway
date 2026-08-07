@@ -26,6 +26,7 @@ import (
 
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
+	"github.com/sumeetgp/spidercob-gateway/internal/pin"
 	"github.com/sumeetgp/spidercob-gateway/internal/policy"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy/stdioadapter"
 	"github.com/sumeetgp/spidercob-gateway/internal/scan"
@@ -81,6 +82,7 @@ type Gateway struct {
 	nodes    map[string]*nodeConfig
 	sessions *sessionManager
 	policy   policy.Engine
+	pins     *pin.Registry
 	scanners *scan.Chain
 	client   *http.Client
 	authn    TokenValidator
@@ -161,6 +163,19 @@ func (g *Gateway) reapLoop() {
 // assign directly) because main.go is a different package.
 func (g *Gateway) SetPolicy(p policy.Engine) {
 	g.policy = p
+}
+
+// SetPinRegistry wires in the tool-pinning (rug-pull defense) registry --
+// the composition root (cmd/spidercob) calls this once, right after
+// SetPolicy, now that a store exists to back it with. A Gateway with no
+// registry set (nil, the zero value) runs with pinning disabled
+// entirely: every tools/call passes the quarantine check and tools/list
+// is never further filtered by it -- the same "start permissive, the
+// composition root opts a real backend in once its dependencies exist"
+// posture SetPolicy already takes, so existing tests and call sites that
+// don't care about pinning don't need to construct a store for it.
+func (g *Gateway) SetPinRegistry(r *pin.Registry) {
+	g.pins = r
 }
 
 // Close stops the idle-session reaper and tears down every live session's
@@ -267,6 +282,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !decision.Allowed {
 		http.Error(sr, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// A tool that passed policy can still be quarantined: policy answers
+	// "is this principal allowed to call this tool," pinning separately
+	// answers "is this still the tool definition everyone agreed to" --
+	// two independent gates, both must pass. No re-approval mechanism
+	// exists yet (Phase 4), so this stays a hard block, not a warning.
+	if rpcMethod == "tools/call" && g.pins != nil && g.pins.IsQuarantined(r.Context(), nodeName, toolName) {
+		http.Error(sr, "tool quarantined: its definition changed since it was first observed", http.StatusForbidden)
 		return
 	}
 
@@ -627,11 +652,15 @@ func jsonRPCToolName(body []byte) string {
 }
 
 // filterToolsListResponse rewrites a tools/list JSON-RPC response's tools
-// array down to only what policy.FilterTools authorizes, preserving every
-// other field (including the upstream's pagination cursor) completely
-// unmodified. If the response isn't a well-formed tools/list result (e.g.
-// the upstream returned a JSON-RPC error instead), body is returned
-// unchanged -- there's no tools array to leak in that case.
+// array down to only what policy.FilterTools authorizes and, of those,
+// only what isn't currently pin-quarantined (issue #9 story 9: a
+// quarantined tool becomes invisible via tools/list, the same "not just
+// blocked" treatment story 14 already established for policy-denied
+// tools) -- preserving every other field (including the upstream's
+// pagination cursor) completely unmodified. If the response isn't a
+// well-formed tools/list result (e.g. the upstream returned a JSON-RPC
+// error instead), body is returned unchanged -- there's no tools array to
+// leak in that case.
 func (g *Gateway) filterToolsListResponse(ctx context.Context, principal, node string, body []byte) []byte {
 	var resp struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -660,6 +689,9 @@ func (g *Gateway) filterToolsListResponse(ctx context.Context, principal, node s
 	}
 
 	allowed := g.policy.FilterTools(ctx, principal, node, names)
+	if g.pins != nil {
+		allowed = g.pins.NonQuarantined(ctx, node, allowed)
+	}
 	filtered := make([]json.RawMessage, 0, len(allowed))
 	for _, name := range allowed {
 		if raw, ok := byName[name]; ok {

@@ -40,6 +40,19 @@ instead of something re-typed by hand each time.
   second call gets 429, distinct from 403. Not part of `make ci-interop`
   — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-pin.sh`** — issue #9's tool pinning, against the real
+  compiled binary with a real stdio node whose one tool's description is
+  controlled by a file the script rewrites mid-run (`dev_allow_all_policy`
+  so only pinning, not policy, is under test): before any refresh, a tool
+  with no pin is neither invisible nor blocked; after the background
+  scheduler's first refresh, the same unchanged tool is still fully
+  normal (TOFU establishment isn't drift); the script then rewrites the
+  description file to simulate a rug pull, and confirms within one more
+  refresh cycle that the tool's `tools/call` is rejected with a
+  pinning-specific (not policy-specific) reason and it's gone from
+  `tools/list`. Not part of `make ci-interop` — no Docker needed, runs in
+  `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user
