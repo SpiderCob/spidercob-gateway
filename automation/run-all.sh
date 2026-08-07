@@ -9,3 +9,5 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$script_dir/run-tests.sh"
 echo
 "$script_dir/run-e2e.sh"
+echo
+"$script_dir/run-e2e-auth.sh"

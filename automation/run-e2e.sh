@@ -11,6 +11,16 @@
 # (echo works, and a real secret gets redacted -- the full DLP pipeline
 # through the real binary), DELETE (real teardown), and reuse-after-delete
 # (rejected, not silently re-created).
+#
+# Every request needs a real, node-scoped bearer token now (issue #3) --
+# minted here via a config-seeded NHI credential (config.SeedAgents; there's
+# no admin API yet to register one over HTTP). The real policy default is
+# DenyAll (nothing is authorized until Phase 3's policy engine exists), so
+# this script's config sets dev_allow_all_policy so the DLP/session pipeline
+# below is actually reachable -- see the field's doc comment in
+# internal/config/config.go for why that's safe only here, never in
+# production. The auth *mechanism itself* (401/wrong-aud/expiry) is
+# run-e2e-auth.sh's job, driven against the real, unmodified DenyAll default.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,6 +82,12 @@ echo "==> writing e2e config (real stdio MCP node: echoserver)"
 cat >"$work_dir/config.json" <<EOF
 {
   "listen": ":${port}",
+  "issuer": "http://127.0.0.1:${port}",
+  "store_db_path": "${work_dir}/spidercob.db",
+  "dev_allow_all_policy": true,
+  "seed_agents": [
+    { "client_id": "e2e-agent", "client_secret": "e2e-secret-not-for-production", "name": "run-e2e.sh" }
+  ],
   "nodes": [
     {
       "name": "echo",
@@ -100,9 +116,19 @@ if ! curl -sf "${base}/healthz" >/dev/null 2>&1; then
 	exit 1
 fi
 
+echo "==> mint a node-scoped access token (client_credentials, seeded agent)"
+token_body=$(curl -sS -X POST "${base}/token" \
+	--data-urlencode "grant_type=client_credentials" \
+	--data-urlencode "client_id=e2e-agent" \
+	--data-urlencode "client_secret=e2e-secret-not-for-production" \
+	--data-urlencode "resource=echo")
+access_token=$(echo "$token_body" | grep -o '"access_token":"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
+check "access token minted" "$([[ -n "$access_token" ]] && echo yes || echo no)" "yes"
+
 echo "==> initialize (new session)"
 init_headers="$work_dir/init_headers.txt"
 init_body=$(curl -sS -D "$init_headers" -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${access_token}" \
 	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
 session_id=$(grep -i '^Mcp-Session-Id:' "$init_headers" | sed -E 's/^[Mm]cp-[Ss]ession-[Ii]d: *//' | tr -d '\r\n')
 check "session id minted" "$([[ -n "$session_id" ]] && echo yes || echo no)" "yes"
@@ -110,12 +136,14 @@ check "mirrored cookie set" "$(grep -qi '^Set-Cookie: spidercob_session=' "$init
 
 echo "==> tools/call: echo"
 echo_body=$(curl -sS -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${access_token}" \
 	-H "Mcp-Session-Id: ${session_id}" \
 	-d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"automation smoke test"}}}')
 check_contains "echo tool returns what it was given" "$echo_body" "automation smoke test"
 
 echo "==> tools/call: secret gets redacted (full DLP pipeline, real binary)"
 secret_body=$(curl -sS -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${access_token}" \
 	-H "Mcp-Session-Id: ${session_id}" \
 	-d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"key AKIAABCDEFGHIJKLMNOP leaked"}}}')
 check_not_contains "raw AWS key not present in response" "$secret_body" "AKIAABCDEFGHIJKLMNOP"
@@ -123,11 +151,13 @@ check_contains "structural redaction marker present" "$secret_body" "[REDACTED:a
 
 echo "==> DELETE (real teardown)"
 delete_status=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${access_token}" \
 	-H "Mcp-Session-Id: ${session_id}")
 check "DELETE returns 204" "$delete_status" "204"
 
 echo "==> reuse after DELETE is rejected"
 reuse_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${access_token}" \
 	-H "Mcp-Session-Id: ${session_id}" \
 	-d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":"should not work"}}}')
 check "dead session rejected with 404" "$reuse_status" "404"

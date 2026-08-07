@@ -19,7 +19,18 @@ instead of something re-typed by hand each time.
   in-process suite structurally can't: does the binary actually start,
   parse its config, bind its port, serve real HTTP.
 
-- **`run-all.sh`** — both, in order. This is the one command to run
+- **`run-e2e-auth.sh`** — issue #3's auth lifecycle, against the real
+  compiled binary with its real, unmodified `DenyAll` default (not
+  `run-e2e.sh`'s `dev_allow_all_policy` escape hatch): unauthenticated
+  request → 401 + `WWW-Authenticate`; JWKS and RFC 9728 metadata actually
+  served; `client_credentials` mint; wrong secret rejected; valid token →
+  403 (`DenyAll`, not 401 — proves auth succeeded, not that access is
+  granted); wrong-audience token rejected; a deliberately-short-TTL token
+  expires and gets rejected; re-minting afterward just works. Mints via a
+  config-seeded NHI credential (`config.SeedAgents`) since there's no admin
+  API yet (Phase 4) to register one over HTTP.
+
+- **`run-all.sh`** — all three, in order. This is the one command to run
   before opening a PR.
 
 ## Extending this as new issues land
