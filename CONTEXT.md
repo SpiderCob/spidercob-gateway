@@ -16,11 +16,11 @@ Open-source, self-hosted MCP gateway: spec-correct agent identity (ID-JAG / MCP 
 
 ## Next up
 
-**Phase 3 — not yet spec'd, and the clear next step.** The original `MASTER_PLAN.md` gate ("don't start Phase 3 before an ID-JAG round-trips through Keycloak") is now satisfied — Phase 2b just did that. Phase 3 replaces `policy.DenyAll{}` with the real group/method/tool evaluator (ALLOW+DENY rule types, deny-overrides-allow-overrides-default-deny — decisions already recorded in `MASTER_PLAN.md` §6), adds `tools/list` filtering and tool pinning (`internal/pin`). **This is what makes the gateway do anything useful end-to-end for the first time** — right now not even Mode B's own real Keycloak test can get past a 403, since there's no policy to grant access with.
+**[Issue #7](https://github.com/SpiderCob/spidercob-gateway/issues/7) — Phase 3a: policy engine v0 (group/method/tool) + `tools/list` filtering — spec published, ready to implement.** Replaces `policy.DenyAll{}` with a real evaluator backed by the store (`groups`/`user_groups`/`agent_groups` already exist since issue #3, unused for decisions until now): server-level → method-level → tool-level, explicit ALLOW+DENY rule types, deny-overrides-allow-overrides-default-deny, additive-allow across group memberships (decisions already recorded in `MASTER_PLAN.md` §6). Also: `tools/list` response filtering (unauthorized tools invisible, not just blocked), per-group/per-NHI rate limiting (defense-in-depth), and block-on-scan-flag (policy can escalate the existing scan pipeline's log-only injection verdicts to an actual block, for specific tool/group combos). Policy authored via config-file bootstrap (same pattern as `SeedAgents`/`TrustedIdPs`) — no admin API yet. **This is the actual "make the gateway do something" milestone** — every prior phase's real e2e test deliberately stopped at a 403 to prove auth without overclaiming access works; this issue is where that finally flips to a real, policy-authorized tool call succeeding end-to-end for the first time.
 
-Run `/to-spec` for Phase 3 (same process used for issues #3 and #5) to produce the spec, then publish it with the `ready-for-agent` label.
+Deliberately **not** bundled into this issue (separate follow-on issues, split for reviewability, not infra reasons this time): tool pinning / schema-drift defense (`MASTER_PLAN.md` §3 Phase 3 item 8), and scan upgrades — schema enforcement, entropy, PII, homoglyph normalization (item 9).
 
-**Secondary, not urgent:** the `make ci-interop`-doesn't-run-in-CI gap noted above. Worth fixing before more Docker-requiring interop targets accumulate, but doesn't block Phase 3.
+**Secondary, not urgent:** the `make ci-interop`-doesn't-run-in-GitHub-Actions-CI gap (needs Docker + network egress, unconfirmed on the self-hosted Hetzner runner). Worth fixing before more Docker-requiring interop targets accumulate, but doesn't block Phase 3a.
 
 ## How to use this file
 
