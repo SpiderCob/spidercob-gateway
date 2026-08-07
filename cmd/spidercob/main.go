@@ -14,6 +14,7 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/idptrust"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
+	"github.com/sumeetgp/spidercob-gateway/internal/policy"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
 )
@@ -29,6 +30,20 @@ func (a authValidator) ValidateAccessToken(node, token string) (proxy.AuthClaims
 		return proxy.AuthClaims{}, err
 	}
 	return proxy.AuthClaims{Subject: c.Subject, Act: c.Act}, nil
+}
+
+// getOrCreateGroup resolves a group by name, creating it if it doesn't
+// already exist -- both SeedAgents.Groups and Policies reference groups by
+// name, auto-created rather than requiring a separate bootstrap step.
+func getOrCreateGroup(db store.Store, name string) (store.Group, error) {
+	g, err := db.CreateGroup(context.Background(), name)
+	if err == nil {
+		return g, nil
+	}
+	if !errors.Is(err, store.ErrConflict) {
+		return store.Group{}, err
+	}
+	return db.GetGroupByName(context.Background(), name)
 }
 
 func main() {
@@ -55,17 +70,65 @@ func main() {
 	identitySvc := identity.NewService(db)
 
 	for _, seed := range cfg.SeedAgents {
-		_, err := identitySvc.CreateAgentWithCredentials(context.Background(), seed.ClientID, seed.ClientSecret, seed.Name)
+		agent, err := identitySvc.CreateAgentWithCredentials(context.Background(), seed.ClientID, seed.ClientSecret, seed.Name)
 		switch {
 		case err == nil:
 			slog.Info("seeded agent", "client_id", seed.ClientID, "name", seed.Name)
 		case errors.Is(err, store.ErrConflict):
 			// Already seeded on a previous startup -- fine, idempotent.
+			// Group assignment below still needs the agent's ID, so fetch
+			// the existing record rather than skipping the rest of this
+			// iteration.
+			agent, err = db.GetAgentByClientID(context.Background(), seed.ClientID)
+			if err != nil {
+				slog.Error("failed to look up already-seeded agent", "client_id", seed.ClientID, "err", err)
+				os.Exit(1)
+			}
 		default:
 			slog.Error("failed to seed agent", "client_id", seed.ClientID, "err", err)
 			os.Exit(1)
 		}
+		for _, groupName := range seed.Groups {
+			g, err := getOrCreateGroup(db, groupName)
+			if err != nil {
+				slog.Error("failed to resolve seed agent group", "group", groupName, "err", err)
+				os.Exit(1)
+			}
+			if err := db.AssignAgentGroup(context.Background(), agent.ID, g.ID); err != nil {
+				slog.Error("failed to assign seed agent to group", "client_id", seed.ClientID, "group", groupName, "err", err)
+				os.Exit(1)
+			}
+		}
 	}
+
+	// Policy config is the sole source of policy truth in this phase (no
+	// admin API exists yet, issue #7) -- fully replaces whatever's in the
+	// store on every startup, unlike identity data. See
+	// store.Store.ReplacePolicies's doc comment for why that's the right
+	// idempotency strategy here specifically.
+	newPolicies := make([]store.NewPolicy, 0, len(cfg.Policies))
+	for _, p := range cfg.Policies {
+		g, err := getOrCreateGroup(db, p.Group)
+		if err != nil {
+			slog.Error("failed to resolve policy group", "group", p.Group, "err", err)
+			os.Exit(1)
+		}
+		newPolicies = append(newPolicies, store.NewPolicy{
+			GroupID:                g.ID,
+			Node:                   p.Node,
+			RuleType:               store.PolicyRuleType(p.RuleType),
+			Methods:                p.Methods,
+			Tools:                  p.Tools,
+			RateLimitMaxCalls:      p.RateLimitMaxCalls,
+			RateLimitWindowSeconds: p.RateLimitWindowSeconds,
+			BlockOnScanFlag:        p.BlockOnScanFlag,
+		})
+	}
+	if err := db.ReplacePolicies(context.Background(), newPolicies); err != nil {
+		slog.Error("failed to apply policy config", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("policy config applied", "rules", len(newPolicies))
 
 	nodeNames := make([]string, 0, len(cfg.Nodes))
 	for _, n := range cfg.Nodes {
@@ -107,6 +170,13 @@ func main() {
 	if err != nil {
 		slog.Error("failed to build proxy", "err", err)
 		os.Exit(1)
+	}
+	if !cfg.DevAllowAllPolicy {
+		// DevAllowAllPolicy, when set, is a blunt dev/CI-only escape hatch
+		// (automation/run-e2e.sh) that must win outright -- it's not meant
+		// to be quietly overridden by whatever real policy config happens
+		// to also be present.
+		gw.SetPolicy(policy.NewEvaluator(db))
 	}
 
 	mux := http.NewServeMux()

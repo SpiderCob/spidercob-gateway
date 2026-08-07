@@ -208,6 +208,120 @@ func TestExternalIdentityResolveOrCreate_ConcurrentFirstLoginNoDuplicate(t *test
 	}
 }
 
+func intPtr(i int) *int { return &i }
+
+func TestReplacePoliciesAndPoliciesForGroups(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	eng, err := s.CreateGroup(ctx, "engineering")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	sre, err := s.CreateGroup(ctx, "sre")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	got, err := s.PoliciesForGroups(ctx, []int64{eng.ID}, "jira")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no policies before ReplacePolicies, got %+v", got)
+	}
+
+	err = s.ReplacePolicies(ctx, []NewPolicy{
+		{GroupID: eng.ID, Node: "jira", RuleType: PolicyAllow, Methods: []string{"tools/call"}, Tools: []string{"search_issues"}},
+		{GroupID: eng.ID, Node: "jira", RuleType: PolicyDeny, Methods: []string{"tools/call"}, Tools: []string{"delete_issue"}},
+		{GroupID: sre.ID, Node: "jira", RuleType: PolicyAllow, RateLimitMaxCalls: intPtr(10), RateLimitWindowSeconds: intPtr(60), BlockOnScanFlag: true},
+		{GroupID: sre.ID, Node: "postgres-ro", RuleType: PolicyAllow},
+	})
+	if err != nil {
+		t.Fatalf("ReplacePolicies: %v", err)
+	}
+
+	engPolicies, err := s.PoliciesForGroups(ctx, []int64{eng.ID}, "jira")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (eng): %v", err)
+	}
+	if len(engPolicies) != 2 {
+		t.Fatalf("expected 2 policies for eng/jira, got %+v", engPolicies)
+	}
+
+	srePolicies, err := s.PoliciesForGroups(ctx, []int64{sre.ID}, "jira")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (sre): %v", err)
+	}
+	if len(srePolicies) != 1 {
+		t.Fatalf("expected 1 policy for sre/jira, got %+v", srePolicies)
+	}
+	p := srePolicies[0]
+	if p.RuleType != PolicyAllow || !p.BlockOnScanFlag {
+		t.Fatalf("unexpected policy: %+v", p)
+	}
+	if p.RateLimitMaxCalls == nil || *p.RateLimitMaxCalls != 10 {
+		t.Fatalf("RateLimitMaxCalls = %v, want 10", p.RateLimitMaxCalls)
+	}
+	if p.RateLimitWindowSeconds == nil || *p.RateLimitWindowSeconds != 60 {
+		t.Fatalf("RateLimitWindowSeconds = %v, want 60", p.RateLimitWindowSeconds)
+	}
+	if len(p.Methods) != 0 {
+		t.Fatalf("expected empty Methods (all methods), got %v", p.Methods)
+	}
+
+	// Wrong node must not leak in.
+	noPostgres, err := s.PoliciesForGroups(ctx, []int64{eng.ID}, "postgres-ro")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (wrong node): %v", err)
+	}
+	if len(noPostgres) != 0 {
+		t.Fatalf("expected no eng policies for postgres-ro, got %+v", noPostgres)
+	}
+
+	// A second ReplacePolicies call fully replaces, not accumulates.
+	if err := s.ReplacePolicies(ctx, []NewPolicy{
+		{GroupID: eng.ID, Node: "jira", RuleType: PolicyAllow},
+	}); err != nil {
+		t.Fatalf("ReplacePolicies (second call): %v", err)
+	}
+	afterReplace, err := s.PoliciesForGroups(ctx, []int64{eng.ID}, "jira")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (after replace): %v", err)
+	}
+	if len(afterReplace) != 1 {
+		t.Fatalf("expected exactly 1 policy after replacement, got %+v (replace should not accumulate)", afterReplace)
+	}
+	sreAfterReplace, err := s.PoliciesForGroups(ctx, []int64{sre.ID}, "jira")
+	if err != nil {
+		t.Fatalf("PoliciesForGroups (sre after replace): %v", err)
+	}
+	if len(sreAfterReplace) != 0 {
+		t.Fatalf("expected sre's policies gone after full replace, got %+v", sreAfterReplace)
+	}
+}
+
+func TestGetGroupByName(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.GetGroupByName(ctx, "engineering"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetGroupByName (unprovisioned) = %v, want ErrNotFound", err)
+	}
+
+	created, err := s.CreateGroup(ctx, "engineering")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	got, err := s.GetGroupByName(ctx, "engineering")
+	if err != nil {
+		t.Fatalf("GetGroupByName: %v", err)
+	}
+	if got != created {
+		t.Fatalf("GetGroupByName = %+v, want %+v", got, created)
+	}
+}
+
 func TestGroupMembership(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

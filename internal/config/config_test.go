@@ -93,6 +93,59 @@ func TestLoad_ValidSeedAgentAccepted(t *testing.T) {
 	}
 }
 
+func TestLoad_SeedAgentGroupsAccepted(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"seed_agents":[{"client_id":"a","client_secret":"s","name":"n","groups":["engineering","sre"]}]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.SeedAgents[0].Groups) != 2 {
+		t.Fatalf("SeedAgents[0].Groups = %v", cfg.SeedAgents[0].Groups)
+	}
+}
+
+func TestLoad_PolicyRequiresGroupAndNode(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[{"rule_type":"allow"}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for a policies entry missing group/node")
+	}
+}
+
+func TestLoad_PolicyRequiresValidRuleType(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[{"group":"eng","node":"jira","rule_type":"maybe"}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for an invalid rule_type")
+	}
+}
+
+func TestLoad_PolicyRateLimitFieldsMustBePaired(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[{"group":"eng","node":"jira","rule_type":"allow","rate_limit_max_calls":10}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error when rate_limit_max_calls is set without rate_limit_window_seconds")
+	}
+}
+
+func TestLoad_ValidPolicyAccepted(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[
+		{"group":"eng","node":"jira","rule_type":"allow","methods":["tools/call"],"tools":["search_issues"],
+		 "rate_limit_max_calls":10,"rate_limit_window_seconds":60,"block_on_scan_flag":true}
+	]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("Policies = %+v", cfg.Policies)
+	}
+	p := cfg.Policies[0]
+	if p.Group != "eng" || p.Node != "jira" || p.RuleType != "allow" || !p.BlockOnScanFlag {
+		t.Fatalf("unexpected policy: %+v", p)
+	}
+	if p.RateLimitMaxCalls == nil || *p.RateLimitMaxCalls != 10 {
+		t.Fatalf("RateLimitMaxCalls = %v", p.RateLimitMaxCalls)
+	}
+}
+
 func TestLoad_TrustedIdPRequiresAllFields(t *testing.T) {
 	path := writeConfig(t, `{"nodes":[],"trusted_idps":[{"issuer":"https://idp.example.com"}]}`)
 	if _, err := Load(path); err == nil {

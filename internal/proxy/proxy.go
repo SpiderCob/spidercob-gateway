@@ -96,6 +96,13 @@ type Gateway struct {
 // New builds a Gateway. authn validates every request's bearer token
 // (issue #3) -- there is no way to construct a Gateway that skips this;
 // the TODO(phase 2) placeholder this replaces is gone, not made optional.
+// Starts with policy.DenyAll{} (or, if cfg.DevAllowAllPolicy is set,
+// policy.AllowAll{}) -- the composition root (cmd/spidercob) wires in the
+// real, store-backed evaluator afterward via SetPolicy, once it has a
+// store to back it with. DevAllowAllPolicy always wins over that: it's a
+// blunt, explicit dev/CI-only escape hatch (automation/run-e2e.sh), not
+// meant to be quietly overridden by whatever real policy config happens
+// to also be present.
 func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
 	if authn == nil {
 		return nil, fmt.Errorf("proxy: a TokenValidator is required")
@@ -145,6 +152,15 @@ func (g *Gateway) reapLoop() {
 			g.sessions.reapIdle(context.Background())
 		}
 	}
+}
+
+// SetPolicy replaces the Gateway's policy engine -- the composition root
+// (cmd/spidercob) calls this once, right after New, to swap in the real,
+// store-backed evaluator (issue #7) now that a store exists to back it
+// with. Exported (rather than the unexported field tests in this package
+// assign directly) because main.go is a different package.
+func (g *Gateway) SetPolicy(p policy.Engine) {
+	g.policy = p
 }
 
 // Close stops the idle-session reaper and tears down every live session's
@@ -206,11 +222,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r = r.WithContext(context.WithValue(r.Context(), authCtxKey{}, claims))
 
-	if !g.policy.Allow(nodeName, r) {
-		http.Error(sr, "forbidden", http.StatusForbidden)
-		return
-	}
-
 	if len(parts) == 2 {
 		r.URL.Path = "/" + parts[1]
 	} else {
@@ -220,11 +231,21 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("Mcp-Session-Id")
 
 	if r.Method == http.MethodDelete {
+		// Ending a session is lifecycle management, not a tool/resource
+		// access -- it isn't policy-gated the way tools/call or
+		// resources/read are. A caller who authenticated against this
+		// node may always end their own session.
 		g.handleDelete(sr, r.Context(), nodeName, sessionID)
 		return
 	}
 
+	// Policy needs the JSON-RPC method (and, for tools/call, the tool
+	// name) to make a method/tool-level decision -- both only exist once
+	// the body is parsed, so body-reading now happens before the policy
+	// check, not after it as it did back when policy was only ever a
+	// coarse node-level bool.
 	var body []byte
+	var toolName string
 	if r.Body != nil && r.Method == http.MethodPost {
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 		if err != nil {
@@ -234,13 +255,34 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = r.Body.Close()
 		body = b
 		rpcMethod = jsonRPCMethod(body)
+		if rpcMethod == "tools/call" {
+			toolName = jsonRPCToolName(body)
+		}
+	}
+
+	decision := g.policy.Decide(r.Context(), claims.Subject, nodeName, rpcMethod, toolName)
+	if decision.RateLimited {
+		http.Error(sr, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	if !decision.Allowed {
+		http.Error(sr, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if body != nil {
 		for _, v := range g.scanners.ScanRequest(body) {
 			metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "request", nodeName)
 			slog.Warn("scan verdict",
 				"scanner", v.Scanner, "action", v.Action.String(),
 				"direction", "request", "node", nodeName,
 				"rpc_method", rpcMethod, "detail", v.Detail)
-			if v.Action == scan.Block {
+			// A matched ALLOW rule can request block-on-scan-flag
+			// (issue #7): escalate any non-clean verdict for this
+			// specific call from "log only" to "block," on top of the
+			// scan chain's own unconditional Block action (e.g. secrets
+			// outbound, already blocked regardless of policy).
+			if v.Action == scan.Block || (decision.BlockOnScanFlag && v.Action != scan.Allow) {
 				writeJSONRPCError(sr, body, "request blocked by spidercob sanitization")
 				return
 			}
@@ -274,7 +316,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.touch()
-	g.forward(sr, r, sess, false)
+	g.forward(sr, r, sess, false, rpcMethod)
 }
 
 // authenticate validates the request's bearer token against nodeName. On
@@ -321,7 +363,7 @@ func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *n
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	g.forward(w, r, sess, true)
+	g.forward(w, r, sess, true, "initialize") // handleNewSession is only ever reached when rpcMethod == "initialize"
 }
 
 func (g *Gateway) handleDelete(w http.ResponseWriter, ctx context.Context, nodeName, sessionID string) {
@@ -379,11 +421,12 @@ func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstr
 }
 
 // forward dispatches one request through a session's upstream, runs the
-// outbound DLP chain over the buffered response, and -- for a newly
-// established session -- stamps the gateway-minted session ID onto both
-// the Mcp-Session-Id header and a mirrored cookie before anything is
-// written to the real client.
-func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool) {
+// outbound DLP chain over the buffered response, filters tools/list
+// responses down to only what the caller's policy actually authorizes,
+// and -- for a newly established session -- stamps the gateway-minted
+// session ID onto both the Mcp-Session-Id header and a mirrored cookie
+// before anything is written to the real client.
+func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod string) {
 	buf := newBufferedResponseWriter()
 	sess.upstream.ServeHTTP(buf, r)
 
@@ -393,6 +436,18 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 		slog.Warn("scan verdict",
 			"scanner", v.Scanner, "action", v.Action.String(),
 			"direction", "response", "node", sess.node, "detail", v.Detail)
+	}
+
+	// tools/list itself is gated by the same method-level policy check
+	// every other method already went through -- reaching this response
+	// stage at all means it was authorized; filtering here further
+	// restricts the *contents* of that permitted response to only the
+	// tools the caller is separately authorized to invoke via tools/call
+	// (story 14: unauthorized tools become invisible, not just blocked).
+	if rpcMethod == "tools/list" {
+		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
+			clean = g.filterToolsListResponse(r.Context(), claims.Subject, sess.node, clean)
+		}
 	}
 
 	for k, vv := range buf.header {
@@ -555,6 +610,70 @@ func jsonRPCMethod(body []byte) string {
 		return "?"
 	}
 	return m.Method
+}
+
+// jsonRPCToolName extracts params.name from a tools/call request body --
+// the tool name policy decisions need for tool-level rules.
+func jsonRPCToolName(body []byte) string {
+	var m struct {
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return ""
+	}
+	return m.Params.Name
+}
+
+// filterToolsListResponse rewrites a tools/list JSON-RPC response's tools
+// array down to only what policy.FilterTools authorizes, preserving every
+// other field (including the upstream's pagination cursor) completely
+// unmodified. If the response isn't a well-formed tools/list result (e.g.
+// the upstream returned a JSON-RPC error instead), body is returned
+// unchanged -- there's no tools array to leak in that case.
+func (g *Gateway) filterToolsListResponse(ctx context.Context, principal, node string, body []byte) []byte {
+	var resp struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  *struct {
+			Tools      []json.RawMessage `json:"tools"`
+			NextCursor string            `json:"nextCursor,omitempty"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Result == nil {
+		return body
+	}
+
+	var names []string
+	byName := make(map[string]json.RawMessage, len(resp.Result.Tools))
+	for _, raw := range resp.Result.Tools {
+		var t struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &t); err != nil || t.Name == "" {
+			continue // malformed tool entry from upstream -- drop rather than risk a policy check on a wrong/empty name
+		}
+		names = append(names, t.Name)
+		byName[t.Name] = raw
+	}
+
+	allowed := g.policy.FilterTools(ctx, principal, node, names)
+	filtered := make([]json.RawMessage, 0, len(allowed))
+	for _, name := range allowed {
+		if raw, ok := byName[name]; ok {
+			filtered = append(filtered, raw)
+		}
+	}
+	resp.Result.Tools = filtered
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		slog.Error("failed to re-marshal filtered tools/list response", "node", node, "err", err)
+		return []byte(`{"jsonrpc":"2.0","error":{"code":-32603,"message":"internal error filtering tools/list"}}`)
+	}
+	return out
 }
 
 func writeJSONRPCError(w http.ResponseWriter, req []byte, msg string) {
