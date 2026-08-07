@@ -22,20 +22,29 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
+	"github.com/sumeetgp/spidercob-gateway/internal/idptrust"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
 )
 
-// Grant types. "client_credentials" is the standard RFC 6749 one; the
-// other two are this gateway's own internal exchange (issue #3's
-// Implementation Decisions calls this "the internal exchange grant") --
-// namespaced under a urn: prefix, the same convention RFC 8693 uses for
-// its own grant/token-type identifiers, so they're unambiguously not a
-// standard OAuth grant a generic client might misinterpret.
+// Grant types. "client_credentials" is the standard RFC 6749 one;
+// "jwt-bearer" is the standard RFC 7523 one (issue #5, Mode B); the other
+// two are this gateway's own internal exchange (issue #3's Implementation
+// Decisions calls this "the internal exchange grant") -- namespaced under
+// a urn: prefix, the same convention RFC 8693 uses for its own
+// grant/token-type identifiers, so they're unambiguously not a standard
+// OAuth grant a generic client might misinterpret.
 const (
 	grantClientCredentials = "client_credentials"
+	grantJWTBearer         = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 	grantLogin             = "urn:spidercob:params:oauth:grant-type:login"
 	grantSession           = "urn:spidercob:params:oauth:grant-type:session"
 )
+
+// idJAGGrantProfile is what this gateway advertises in RFC 9728's
+// authorization_grant_profiles_supported once at least one external IdP
+// is trusted (issue #5) -- the MCP EMA extension's client-discovery
+// signal for "this resource server accepts ID-JAGs."
+const idJAGGrantProfile = "urn:ietf:params:oauth:grant-profile:id-jag"
 
 // sessionCookieName is the Mode A local-session cookie, scoped to Path
 // "/token" only -- it must never be sent to /mcp/ routes, which use their
@@ -68,6 +77,12 @@ type Config struct {
 
 	Identity *identity.Service
 	Store    store.Store
+	// IdPTrust enables Mode B (issue #5): the RFC 7523 jwt-bearer grant
+	// and RFC 9728's id-jag grant-profile advertisement. Nil (or an empty
+	// TrustStore) means Mode B is entirely absent -- ServeToken rejects
+	// the jwt-bearer grant type the same way it rejects any other
+	// unsupported grant, and metadata never advertises id-jag support.
+	IdPTrust *idptrust.TrustStore
 
 	NHITokenTTL     time.Duration // zero -> DefaultNHITokenTTL
 	HumanTokenTTL   time.Duration // zero -> DefaultHumanTokenTTL
@@ -79,6 +94,7 @@ type Config struct {
 type AuthServer struct {
 	issuer   string
 	identity *identity.Service
+	idpTrust *idptrust.TrustStore // nil means Mode B is disabled entirely
 	keys     *KeySet
 	nodes    map[string]struct{}
 	denylist *denylist
@@ -117,6 +133,7 @@ func New(ctx context.Context, cfg Config) (*AuthServer, error) {
 	as := &AuthServer{
 		issuer:     strings.TrimRight(cfg.Issuer, "/"),
 		identity:   cfg.Identity,
+		idpTrust:   cfg.IdPTrust,
 		keys:       keys,
 		nodes:      nodes,
 		denylist:   dl,
@@ -272,15 +289,16 @@ func (a *AuthServer) ServeProtectedResourceMetadata(w http.ResponseWriter, r *ht
 		http.NotFound(w, r)
 		return
 	}
+	profiles := []string{}
+	if a.idpTrust != nil && a.idpTrust.HasAny() {
+		profiles = append(profiles, idJAGGrantProfile)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"resource":                 a.resourceURI(node),
-		"authorization_servers":    []string{a.issuer},
-		"bearer_methods_supported": []string{"header"},
-		// Empty until Phase 2b wires external IdP trust (issue #3's
-		// Implementation Decisions) -- the field exists now so that work
-		// only has to populate it, not add it.
-		"authorization_grant_profiles_supported": []string{},
+		"resource":                               a.resourceURI(node),
+		"authorization_servers":                  []string{a.issuer},
+		"bearer_methods_supported":               []string{"header"},
+		"authorization_grant_profiles_supported": profiles,
 	})
 }
 
@@ -307,6 +325,8 @@ func (a *AuthServer) ServeToken(w http.ResponseWriter, r *http.Request) {
 	switch r.FormValue("grant_type") {
 	case grantClientCredentials:
 		a.handleClientCredentials(w, r, node)
+	case grantJWTBearer:
+		a.handleJWTBearer(w, r, node)
 	case grantLogin:
 		a.handleLogin(w, r, node)
 	case grantSession:
@@ -329,6 +349,58 @@ func (a *AuthServer) handleClientCredentials(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeTokenResponse(w, signed, claims, "")
+}
+
+// handleJWTBearer implements RFC 7523's JWT-bearer grant for Mode B
+// (issue #5): the assertion is a real external ID-JAG, already validated
+// by the customer's IdP via RFC 8693 token exchange before it ever reaches
+// this gateway. This handler's job is narrower: confirm the assertion is
+// genuinely from a trusted issuer and bound to this gateway (idptrust),
+// enforce its one-time-use jti, JIT-resolve-or-create the local user, and
+// mint the exact same shape of access token every other grant already
+// produces -- no new minting logic, no new claim shape (story 13).
+func (a *AuthServer) handleJWTBearer(w http.ResponseWriter, r *http.Request, node string) {
+	if a.idpTrust == nil {
+		writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type", "no trusted external IdP is configured")
+		return
+	}
+	assertion := r.FormValue("assertion")
+	if assertion == "" {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "missing assertion")
+		return
+	}
+
+	claims, err := a.idpTrust.Validate(assertion)
+	if err != nil {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_grant", "invalid ID-JAG assertion")
+		return
+	}
+
+	// One-time-use (story 7): atomically check-and-mark so two concurrent
+	// redemptions of a captured assertion can't both slip through the
+	// same TOCTOU gap this closes for access-token revocation elsewhere.
+	fresh, err := a.denylist.tryConsume(r.Context(), claims.ID, claims.ExpiresAt.Time)
+	if err != nil {
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to record assertion use")
+		return
+	}
+	if !fresh {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_grant", "assertion already used")
+		return
+	}
+
+	user, err := a.identity.ResolveOrCreateExternalUser(r.Context(), claims.Issuer, claims.Subject)
+	if err != nil {
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to resolve user")
+		return
+	}
+
+	signed, accessClaims, err := a.mintAccessToken("user:"+user.Username, claims.Act, node, a.humanTTL)
+	if err != nil {
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to mint token")
+		return
+	}
+	writeTokenResponse(w, signed, accessClaims, "")
 }
 
 func (a *AuthServer) handleLogin(w http.ResponseWriter, r *http.Request, node string) {

@@ -82,6 +82,14 @@ type Config struct {
 	// it true means every authenticated caller can reach every tool on
 	// every registered node. Never set this outside local dev or CI.
 	DevAllowAllPolicy bool `json:"dev_allow_all_policy,omitempty"`
+
+	// TrustedIdPs declares external IdPs this gateway accepts ID-JAGs from
+	// (Mode B, issue #5). Config-file-only bootstrap, same pattern as
+	// SeedAgents -- there's no admin API yet to register trust over HTTP.
+	// Absent or empty means Mode B is entirely disabled: the jwt-bearer
+	// grant is rejected and RFC 9728 metadata never advertises id-jag
+	// support.
+	TrustedIdPs []TrustedIdP `json:"trusted_idps,omitempty"`
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See
@@ -90,6 +98,22 @@ type SeedAgent struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	Name         string `json:"name"`
+}
+
+// TrustedIdP is one externally-trusted IdP an ID-JAG may come from. See
+// Config.TrustedIdPs.
+type TrustedIdP struct {
+	// Issuer must exactly match the `iss` claim the IdP stamps on its
+	// ID-JAGs.
+	Issuer string `json:"issuer"`
+	// JWKSURL is where this IdP publishes its own signing keys.
+	JWKSURL string `json:"jwks_url"`
+	// ExpectedAudience is what an ID-JAG's `aud` must equal to be accepted
+	// -- this gateway's own AS identity (normally the same value as
+	// Config.Issuer), per RFC 7523's resource-server-is-the-audience
+	// requirement. Not a node -- that's the resulting access token's aud,
+	// a separate value.
+	ExpectedAudience string `json:"expected_audience"`
 }
 
 func Load(path string) (*Config, error) {
@@ -146,6 +170,11 @@ func Load(path string) (*Config, error) {
 	for _, a := range c.SeedAgents {
 		if a.ClientID == "" || a.ClientSecret == "" || a.Name == "" {
 			return nil, fmt.Errorf("seed_agents entries need client_id, client_secret, and name")
+		}
+	}
+	for _, t := range c.TrustedIdPs {
+		if t.Issuer == "" || t.JWKSURL == "" || t.ExpectedAudience == "" {
+			return nil, fmt.Errorf("trusted_idps entries need issuer, jwks_url, and expected_audience")
 		}
 	}
 	return &c, nil

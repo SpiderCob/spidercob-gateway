@@ -49,12 +49,45 @@ func (svc *Service) Authenticate(ctx context.Context, username, password string)
 	}
 	ok, err := verifySecret(password, u.PasswordHash)
 	if err != nil {
-		return store.User{}, err
+		// A malformed hash (notably unusablePasswordHash, story 23 --
+		// JIT-provisioned Mode B accounts can never have a real one) means
+		// "can't authenticate," same as a wrong password -- never leak the
+		// distinction between "bad password" and "this account has no
+		// usable password at all."
+		return store.User{}, ErrInvalidCredentials
 	}
 	if !ok {
 		return store.User{}, ErrInvalidCredentials
 	}
 	return u, nil
+}
+
+// unusablePasswordHash is stored for JIT-provisioned (Mode B) users
+// instead of a real argon2id hash (issue #5, story 23). It deliberately
+// isn't in PHC format, so verifySecret always fails to parse it and
+// Authenticate always returns ErrInvalidCredentials -- an externally-
+// governed identity can never gain a second, gateway-local password
+// nobody assigned it.
+const unusablePasswordHash = "!external-identity-no-local-password"
+
+// ResolveOrCreateExternalUser is the JIT-provisioning seam for Mode B
+// (issue #5): given a validated external IdP's (issuer, subject), it
+// resolves the existing local user from a prior login, or creates a new
+// one -- zero group memberships by default, same default-deny guarantee
+// as any other new account (story 11). The username assigned to a newly
+// created account is internal bookkeeping only, never used for lookup --
+// every subsequent resolution goes through (issuer, subject), never
+// through it. The resolve-or-create itself is delegated to the store as
+// one atomic operation (not composed from separate lookup/insert calls
+// here) so two concurrent first-logins for the same (issuer, subject)
+// can't race into two different user rows.
+func (svc *Service) ResolveOrCreateExternalUser(ctx context.Context, issuer, subject string) (store.User, error) {
+	username, err := randomToken("ext_", 16)
+	if err != nil {
+		return store.User{}, err
+	}
+	u, _, err := svc.store.ResolveOrCreateExternalUser(ctx, issuer, subject, username, unusablePasswordHash)
+	return u, err
 }
 
 // CreateAgent registers an NHI with a freshly generated client_id and

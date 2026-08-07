@@ -88,6 +88,81 @@ func (s *SQLiteStore) GetUserByID(ctx context.Context, id int64) (User, error) {
 	return u, err
 }
 
+func (s *SQLiteStore) GetUserByExternalIdentity(ctx context.Context, issuer, subject string) (User, error) {
+	var u User
+	err := s.db.QueryRowContext(ctx,
+		`SELECT u.id, u.username, u.password_hash, u.created_at
+		 FROM users u
+		 JOIN external_identities ei ON ei.user_id = u.id
+		 WHERE ei.issuer = ? AND ei.subject = ?`, issuer, subject,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrNotFound
+	}
+	return u, err
+}
+
+func (s *SQLiteStore) LinkExternalIdentity(ctx context.Context, userID int64, issuer, subject string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO external_identities (user_id, issuer, subject) VALUES (?, ?, ?)`, userID, issuer, subject)
+	if isUniqueConstraint(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// ResolveOrCreateExternalUser runs the whole check-then-insert inside one
+// transaction -- the write-concurrency doc comment on SQLiteStore already
+// serializes every statement through a single connection, but without a
+// transaction two concurrent first-logins for the same (issuer, subject)
+// could still interleave their separate SELECT/INSERT round trips and
+// create two different user rows, one of them orphaned when its
+// external_identities INSERT loses the UNIQUE(issuer, subject) race. A
+// transaction holds the connection for its whole duration, so that
+// interleaving can't happen.
+func (s *SQLiteStore) ResolveOrCreateExternalUser(ctx context.Context, issuer, subject, newUsername, newPasswordHash string) (User, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op if already committed
+
+	var u User
+	err = tx.QueryRowContext(ctx,
+		`SELECT u.id, u.username, u.password_hash, u.created_at
+		 FROM users u
+		 JOIN external_identities ei ON ei.user_id = u.id
+		 WHERE ei.issuer = ? AND ei.subject = ?`, issuer, subject,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.CreatedAt)
+	if err == nil {
+		return u, false, tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return User{}, false, err
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO users (username, password_hash) VALUES (?, ?)`, newUsername, newPasswordHash)
+	if err != nil {
+		return User{}, false, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return User{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO external_identities (user_id, issuer, subject) VALUES (?, ?, ?)`, id, issuer, subject,
+	); err != nil {
+		return User{}, false, err
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, username, password_hash, created_at FROM users WHERE id = ?`, id,
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.CreatedAt); err != nil {
+		return User{}, false, err
+	}
+	return u, true, tx.Commit()
+}
+
 func (s *SQLiteStore) CreateAgent(ctx context.Context, clientID, secretHash, name string) (Agent, error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO agents (client_id, secret_hash, name) VALUES (?, ?, ?)`, clientID, secretHash, name)

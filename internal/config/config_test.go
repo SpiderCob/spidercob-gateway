@@ -93,6 +93,24 @@ func TestLoad_ValidSeedAgentAccepted(t *testing.T) {
 	}
 }
 
+func TestLoad_TrustedIdPRequiresAllFields(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"trusted_idps":[{"issuer":"https://idp.example.com"}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for a trusted_idps entry missing jwks_url/expected_audience")
+	}
+}
+
+func TestLoad_ValidTrustedIdPAccepted(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"trusted_idps":[{"issuer":"https://idp.example.com","jwks_url":"https://idp.example.com/jwks","expected_audience":"https://gw.test"}]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TrustedIdPs) != 1 || cfg.TrustedIdPs[0].Issuer != "https://idp.example.com" {
+		t.Fatalf("TrustedIdPs = %+v", cfg.TrustedIdPs)
+	}
+}
+
 func TestLoad_ExplicitIssuerNotOverridden(t *testing.T) {
 	path := writeConfig(t, `{"issuer":"https://gateway.example.com","nodes":[]}`)
 	cfg, err := Load(path)

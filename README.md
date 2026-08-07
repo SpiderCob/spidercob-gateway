@@ -2,7 +2,7 @@
 
 **The open-source MCP gateway for teams without an IAM department** — enterprise-grade agent identity (ID-JAG / MCP Enterprise-Managed Authorization) and traffic inspection, in one container.
 
-> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, phase 2a** — routing/sanitization skeleton plus real identity and token issuance; every request is now authenticated, but nothing is authorized yet (`policy.DenyAll{}` — Phase 3 hasn't landed). Not production-ready.
+> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, phase 2b** — routing/sanitization skeleton plus real identity and token issuance across all three modes (local, NHI, external IdP); every request is now authenticated, but nothing is authorized yet (`policy.DenyAll{}` — Phase 3 hasn't landed). Not production-ready.
 
 ## Why
 
@@ -58,7 +58,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 
 - [x] Phase 1: JSON-RPC-aware routing, buffered scan pipeline, stdio adapter
 - [x] Phase 2a: embedded IdP + AS core — local users/NHI credentials, `/token`, JWKS, per-node tokens (RFC 8707), RFC 9728 metadata, real bearer-token enforcement
-- [ ] Phase 2b: external IdP interop — ID-JAG grant (RFC 7523/8693) against Keycloak and Okta
+- [x] Phase 2b: external IdP interop — ID-JAG grant (RFC 7523/8693), verified against a real Keycloak realm; Okta via a manual runbook
 - [ ] Phase 3: group/method/tool policy, `tools/list` filtering, tool pinning
 - [ ] Phase 4: admin UI, CSV users, docker packaging → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)

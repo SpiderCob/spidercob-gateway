@@ -12,6 +12,7 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/authserver"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
+	"github.com/sumeetgp/spidercob-gateway/internal/idptrust"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
@@ -71,11 +72,28 @@ func main() {
 		nodeNames = append(nodeNames, n.Name)
 	}
 
+	var trust *idptrust.TrustStore
+	if len(cfg.TrustedIdPs) > 0 {
+		issuers := make([]idptrust.TrustedIssuer, 0, len(cfg.TrustedIdPs))
+		for _, t := range cfg.TrustedIdPs {
+			issuers = append(issuers, idptrust.TrustedIssuer{
+				Issuer: t.Issuer, JWKSURL: t.JWKSURL, ExpectedAudience: t.ExpectedAudience,
+			})
+		}
+		trust, err = idptrust.New(context.Background(), issuers)
+		if err != nil {
+			slog.Error("failed to build idptrust", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("Mode B (external IdP) enabled", "trusted_issuers", len(issuers))
+	}
+
 	as, err := authserver.New(context.Background(), authserver.Config{
 		Issuer:          cfg.Issuer,
 		Nodes:           nodeNames,
 		Identity:        identitySvc,
 		Store:           db,
+		IdPTrust:        trust,
 		NHITokenTTL:     time.Duration(cfg.NHITokenTTLSeconds) * time.Second,
 		HumanTokenTTL:   time.Duration(cfg.HumanTokenTTLSeconds) * time.Second,
 		LocalSessionTTL: time.Duration(cfg.LocalSessionTTLSeconds) * time.Second,

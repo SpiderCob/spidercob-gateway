@@ -1,11 +1,14 @@
 // Package store abstracts persistence. SQLite (modernc.org/sqlite, no cgo)
 // is the phase-2 implementation; Postgres arrives with HA (design doc §8).
 //
-// Scope for this package, as of Phase 2a (issue #3): users, agents (NHI),
-// groups, user_groups, agent_groups, revocations. The Phase 3+ tables
-// (mcp_nodes, tool_pins, policies, sanitizer_profiles, idp_trust,
-// audit_log) are out of scope here and land with the phases that need
-// them.
+// Scope as of Phase 2b (issue #5): users, agents (NHI), groups,
+// user_groups, agent_groups, revocations (issue #3), plus
+// external_identities (JIT-provisioned Mode B users, issue #5). Trusted
+// external-IdP config (idp_trust in design doc §8) is config-file-only for
+// now, not a table -- same bootstrap pattern as SeedAgents, no admin API
+// exists yet to justify persisting it. The Phase 3+ tables (mcp_nodes,
+// tool_pins, policies, sanitizer_profiles, audit_log) are out of scope
+// here and land with the phases that need them.
 package store
 
 import (
@@ -50,6 +53,17 @@ type Group struct {
 	Name string
 }
 
+// ExternalIdentity links a JIT-provisioned (Mode B) user to the external
+// IdP identity that provisioned it -- one row per (issuer, subject) a user
+// has authenticated through.
+type ExternalIdentity struct {
+	ID        int64
+	UserID    int64
+	Issuer    string
+	Subject   string
+	CreatedAt time.Time
+}
+
 // Revocation is one denylisted access-token jti, persisted so the
 // authserver's in-memory denylist survives a gateway restart.
 type Revocation struct {
@@ -73,6 +87,19 @@ type Store interface {
 	CreateAgent(ctx context.Context, clientID, secretHash, name string) (Agent, error)
 	GetAgentByClientID(ctx context.Context, clientID string) (Agent, error)
 	GetAgentByID(ctx context.Context, id int64) (Agent, error)
+
+	// GetUserByExternalIdentity resolves a user previously JIT-provisioned
+	// for this (issuer, subject) pair. Returns ErrNotFound on first login.
+	GetUserByExternalIdentity(ctx context.Context, issuer, subject string) (User, error)
+	// LinkExternalIdentity records that userID was provisioned by/is
+	// reachable via this (issuer, subject) pair.
+	LinkExternalIdentity(ctx context.Context, userID int64, issuer, subject string) error
+	// ResolveOrCreateExternalUser atomically resolves the existing user for
+	// (issuer, subject), or creates one (with newUsername/newPasswordHash)
+	// and links it, in a single transaction -- so two concurrent
+	// first-logins for the same external identity can't race into two
+	// different user rows. created reports whether a new user was made.
+	ResolveOrCreateExternalUser(ctx context.Context, issuer, subject, newUsername, newPasswordHash string) (user User, created bool, err error)
 
 	CreateGroup(ctx context.Context, name string) (Group, error)
 	AssignUserGroup(ctx context.Context, userID, groupID int64) error

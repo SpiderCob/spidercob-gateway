@@ -55,3 +55,23 @@ func (d *denylist) isRevoked(jti string) bool {
 	_, revoked := d.jtis[jti]
 	return revoked
 }
+
+// tryConsume atomically checks-and-marks jti as used, closing the TOCTOU
+// gap a separate isRevoked-then-revoke pair would leave -- two concurrent
+// redemptions of the same one-time-use assertion (issue #5, ID-JAG jti
+// enforcement) must not both be able to observe "not yet used." Returns
+// fresh=true if this call is the one that claimed jti; fresh=false means
+// it was already consumed (a replay) and the caller must reject.
+func (d *denylist) tryConsume(ctx context.Context, jti string, expiresAt time.Time) (fresh bool, err error) {
+	d.mu.Lock()
+	if _, already := d.jtis[jti]; already {
+		d.mu.Unlock()
+		return false, nil
+	}
+	d.jtis[jti] = expiresAt
+	d.mu.Unlock()
+	if err := d.store.RevokeJTI(ctx, jti, expiresAt); err != nil {
+		return true, err
+	}
+	return true, nil
+}
