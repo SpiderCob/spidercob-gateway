@@ -6,20 +6,16 @@
 
 Open-source, self-hosted MCP gateway: spec-correct agent identity (ID-JAG / MCP Enterprise-Managed Authorization) plus policy and DLP, in one container, for teams without a dedicated IAM department. Full north star: `MASTER_PLAN.md` §0 on `main`.
 
-## Where things stand (as of 2026-08-06)
+## Where things stand (as of 2026-08-07)
 
-- Phase 1 spec published: [GitHub issue #1](https://github.com/SpiderCob/spidercob-gateway/issues/1) — session mapping + stdio adapter, with a resequenced build order (see the issue's comments, and `MASTER_PLAN.md` §3/§6 2026-08-06 entry).
-- **No implementation has started yet.** The codebase is still the pre-existing skeleton: a routing proxy with seed DLP/injection scanners, `policy` is a stub (`AllowAll` — should become `DenyAll` once real tokens exist in Phase 2, per the decisions log), no identity/auth, no admin UI. See `MASTER_PLAN.md` §2 for the full accurate inventory — don't trust the README, it understates and overstates progress in different places.
+- **Issue #1 is fully implemented, all 5 items, and validated end-to-end — but not yet merged.** [PR #2](https://github.com/SpiderCob/spidercob-gateway/pull/2) is open against `main` on branch `issue-1-session-mapping`, closes [issue #1](https://github.com/SpiderCob/spidercob-gateway/issues/1). Full suite green under `-race`, reconfirmed across repeated runs. **`main` itself still has the pre-Phase-1 skeleton** (`AllowAll` policy stub, no identity/auth, no admin UI, no session concept) until this PR merges — don't assume Phase 1 behavior is live on `main` yet.
+- What's in the PR: streaming-scan interface groundwork; the go-sdk adopted for gateway→upstream connections; stdio nodes routable through the same path as HTTP nodes (with a DLP-scanning gap I found and closed along the way); gateway-minted session IDs with a translation table + mirrored cookie, working across both transports; idle session timeout; full stdio crash detection, backoff, and quarantine. `docs/session-lifecycle.md` (also in the PR) has Mermaid sequence diagrams for all of this — read that before touching `internal/proxy/` again, it's the fastest way back up to speed on the session-lifecycle mechanics.
 - Development workflow (branch per issue, TDD, real end-to-end validation against an actual MCP server before any PR, merge only after that passes) is documented in `CLAUDE.md` on `main` under "Development workflow." Every issue must follow it — including updating *this file* after merging.
 
 ## Next up
 
-Issue #1, in the resequenced order documented in its GitHub comments:
-1. Streaming-scan interface groundwork (independent, do first)
-2. Minimal stdio proxying (no crash supervision yet)
-3. Session mapping (tested against both HTTP and stdio nodes together)
-4. Idle session timeout (same dual-transport testing)
-5. Full stdio process supervision (crash restart/backoff, quarantine)
+1. **Get PR #2 reviewed and merged.** Nothing else should start until this lands — `main` is stale relative to it.
+2. After merge: flip the Phase 1 checkboxes in `MASTER_PLAN.md` §3, update this file's "where things stand" section to reflect `main`, then move to Phase 2 (identity & tokens) per `MASTER_PLAN.md`.
 
 ## How to use this file
 
