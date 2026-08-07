@@ -16,12 +16,9 @@ Open-source, self-hosted MCP gateway: spec-correct agent identity (ID-JAG / MCP 
 
 ## Next up
 
-**Two follow-on Phase 3 issues, neither spec'd yet, deliberately split from 3a for reviewability** (`MASTER_PLAN.md` §3):
+**[Issue #9](https://github.com/SpiderCob/spidercob-gateway/issues/9) — Phase 3b: tool pinning (rug-pull defense) via TOFU + periodic drift detection — spec published, ready to implement.** New `internal/pin` package: the first `tools/list` observed for a node becomes its trusted baseline automatically (TOFU — no admin approval flow exists yet to make a real trust decision with), hashing name+description+`inputSchema` together per tool. A background refresher (per-node ticker, admin-configurable interval, mirrors the existing idle-session-reaper pattern) periodically re-checks and quarantines any tool whose hash has drifted — per-tool, not per-node. Quarantined tools are rejected on `tools/call` and hidden from `tools/list`, composing with (not replacing) issue #7's policy-based filtering at the same two integration points. **Critical constraint: pins must persist across restarts** — TOFU only applies to a genuinely new (node, tool) pair, never re-triggered by a restart, or the whole defense is trivially bypassed by an attacker waiting for one. No re-approval mechanism in this issue (Phase 4, same as every other "no admin API yet" gap already scoped around in this repo).
 
-- **Phase 3b — tool pinning / rug-pull defense.** `internal/pin`: snapshot `tools/list` on node registration, hash name+description+inputSchema, quarantine on drift. Periodic background refresh, not per-request diffing (latency budget).
-- **Phase 3c — scan upgrades.** `internal/scan`: schema enforcement against pinned `inputSchema` (do this first, cheapest/broadest win — and depends on 3b's pinning existing), Gitleaks-derived secret rule expansion, entropy scorer, PII with Luhn, homoglyph/zero-width normalization. Issue #7's `block_on_scan_flag` already lets a policy rule escalate the *existing* two-scanner pipeline's verdicts per tool/group — 3c is about the scanners themselves getting richer, not the policy-escalation mechanism (already built).
-
-Neither is gated on the other — pick whichever makes more sense next, or ask the user. Run `/to-spec` for whichever is picked (same process used for issues #3, #5, #7).
+**Phase 3c (scan upgrades) is the other follow-on, still not spec'd** — deliberately picked up *after* 3b rather than before, since 3c's first and cheapest item (schema enforcement against pinned `inputSchema`) explicitly depends on 3b's pins existing.
 
 **Secondary, not urgent:** `make ci-interop` still doesn't run in GitHub Actions CI (needs Docker + network egress, unconfirmed on the self-hosted Hetzner runner) — `MASTER_PLAN.md` §7 open decision, unresolved across three issues now.
 
