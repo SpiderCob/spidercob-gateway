@@ -5,9 +5,16 @@ services:
     ports: ["8080:8080"]
     volumes: ["../config.json:/config.json:ro"]
 
-  # Phase 0 interop harness (see ../interop/README.md)
+  # Phase 0 interop harness (see ../interop/README.md), driven for real by
+  # ../automation/run-e2e-idjag.sh (issue #5). `:latest`, not a pin --
+  # standard (V2) token exchange's availability/default-on status moved
+  # meaningfully between 26.0 (needs a preview feature flag) and later
+  # 26.x releases (enabled by default); this harness is meant to track
+  # "current Keycloak" per interop/README.md's own framing, and a version
+  # mismatch surfacing as a real interop failure here is exactly the
+  # "found early, not late" signal design.md's GTM plan wants anyway.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0
+    image: quay.io/keycloak/keycloak:latest
     command: ["start-dev"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin

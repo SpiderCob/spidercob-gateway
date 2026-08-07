@@ -119,6 +119,79 @@ func TestAgentCreateAndAuthenticate(t *testing.T) {
 	}
 }
 
+func TestResolveOrCreateExternalUser_FirstLoginProvisionsZeroGroupAccount(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	u, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser: %v", err)
+	}
+	if u.ID == 0 {
+		t.Fatalf("expected a real user id")
+	}
+
+	got, err := svc.store.UserGroups(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("UserGroups: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("JIT-provisioned user should start with zero groups, got %v", got)
+	}
+}
+
+func TestResolveOrCreateExternalUser_SecondLoginResolvesSameAccount(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	first, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (first): %v", err)
+	}
+	second, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (second): %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second login resolved a different account: %+v vs %+v", second, first)
+	}
+}
+
+func TestResolveOrCreateExternalUser_DifferentIssuersAreDistinctAccounts(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	a, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp-a.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (idp-a): %v", err)
+	}
+	b, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp-b.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (idp-b): %v", err)
+	}
+	if a.ID == b.ID {
+		t.Fatalf("same subject at two different issuers must not collapse into one account")
+	}
+}
+
+func TestResolveOrCreateExternalUser_CannotAuthenticateViaLocalLogin(t *testing.T) {
+	// Story 23: a JIT-provisioned account can never gain a second,
+	// gateway-local password nobody assigned it.
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	u, err := svc.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser: %v", err)
+	}
+
+	for _, password := range []string{"", "password", u.PasswordHash, "!external-identity-no-local-password"} {
+		if _, err := svc.Authenticate(ctx, u.Username, password); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Authenticate(%q, %q) = %v, want ErrInvalidCredentials", u.Username, password, err)
+		}
+	}
+}
+
 func TestCreateAgentWithCredentials_UsesCallerSuppliedValues(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

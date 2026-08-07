@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -119,6 +120,91 @@ func TestAgentCRUD(t *testing.T) {
 
 	if _, err := s.CreateAgent(ctx, "client-123", "sechash-2", "dup"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate CreateAgent = %v, want ErrConflict", err)
+	}
+}
+
+func TestExternalIdentityResolveOrCreate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.GetUserByExternalIdentity(ctx, "https://idp.example.com", "alice-sub"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetUserByExternalIdentity (unprovisioned) = %v, want ErrNotFound", err)
+	}
+
+	u, created, err := s.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub", "ext_alice", "!unusable")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (first login): %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created=true on first login")
+	}
+
+	got, err := s.GetUserByExternalIdentity(ctx, "https://idp.example.com", "alice-sub")
+	if err != nil {
+		t.Fatalf("GetUserByExternalIdentity: %v", err)
+	}
+	if got != u {
+		t.Fatalf("GetUserByExternalIdentity = %+v, want %+v", got, u)
+	}
+
+	// Second login for the same (issuer, subject) resolves the same user,
+	// doesn't create a duplicate.
+	u2, created2, err := s.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "alice-sub", "ext_alice_2", "!unusable")
+	if err != nil {
+		t.Fatalf("ResolveOrCreateExternalUser (second login): %v", err)
+	}
+	if created2 {
+		t.Fatalf("expected created=false on second login")
+	}
+	if u2 != u {
+		t.Fatalf("second login resolved a different user: %+v, want %+v", u2, u)
+	}
+
+	// A different subject at the same issuer must not resolve to the same user.
+	if _, err := s.GetUserByExternalIdentity(ctx, "https://idp.example.com", "bob-sub"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetUserByExternalIdentity (different subject) = %v, want ErrNotFound", err)
+	}
+
+	// The same (issuer, subject) pair can't be linked to two different users.
+	u3, err := s.CreateUser(ctx, "ext_manual", "!unusable")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.LinkExternalIdentity(ctx, u3.ID, "https://idp.example.com", "alice-sub"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate LinkExternalIdentity = %v, want ErrConflict", err)
+	}
+}
+
+func TestExternalIdentityResolveOrCreate_ConcurrentFirstLoginNoDuplicate(t *testing.T) {
+	// The race this guards against: two concurrent first-logins for the
+	// same (issuer, subject) must resolve to exactly one user, not two.
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const n = 10
+	type result struct {
+		u   User
+		err error
+	}
+	results := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			u, _, err := s.ResolveOrCreateExternalUser(ctx, "https://idp.example.com", "concurrent-sub",
+				fmt.Sprintf("ext_concurrent_%d", i), "!unusable")
+			results <- result{u, err}
+		}(i)
+	}
+
+	seen := map[int64]bool{}
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("ResolveOrCreateExternalUser: %v", r.err)
+		}
+		seen[r.u.ID] = true
+	}
+	if len(seen) != 1 {
+		t.Fatalf("expected exactly one distinct user across %d concurrent first-logins, got %d", n, len(seen))
 	}
 }
 
