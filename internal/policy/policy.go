@@ -15,3 +15,14 @@ type Engine interface {
 type AllowAll struct{}
 
 func (AllowAll) Allow(string, *http.Request) bool { return true }
+
+// DenyAll is the phase-2 default, replacing AllowAll the moment real
+// tokens exist (MASTER_PLAN.md §6, 2026-08-04 decision): a validly
+// authenticated caller with no assigned group still gets nothing, not
+// everything, until Phase 3's real group/method/tool evaluator lands.
+// Fail static, never fail open (design doc §0) applies here too -- an
+// unauthored policy state must resolve to "nothing works," not "anything
+// goes."
+type DenyAll struct{}
+
+func (DenyAll) Allow(string, *http.Request) bool { return false }

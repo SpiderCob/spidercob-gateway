@@ -51,3 +51,55 @@ func TestLoad_StreamableHTTPNodeRequiresUpstreamURL(t *testing.T) {
 		t.Fatal("expected an error for a streamable_http node with no upstream_url, got nil")
 	}
 }
+
+func TestLoad_IdentityDefaultsApplied(t *testing.T) {
+	path := writeConfig(t, `{"listen":":9090","nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Issuer != "http://localhost:9090" {
+		t.Fatalf("Issuer = %q, want http://localhost:9090", cfg.Issuer)
+	}
+	if cfg.StoreDBPath != DefaultStoreDBPath {
+		t.Fatalf("StoreDBPath = %q, want %q", cfg.StoreDBPath, DefaultStoreDBPath)
+	}
+	if cfg.NHITokenTTLSeconds != DefaultNHITokenTTLSeconds {
+		t.Fatalf("NHITokenTTLSeconds = %d, want %d", cfg.NHITokenTTLSeconds, DefaultNHITokenTTLSeconds)
+	}
+	if cfg.HumanTokenTTLSeconds != DefaultHumanTokenTTLSeconds {
+		t.Fatalf("HumanTokenTTLSeconds = %d, want %d", cfg.HumanTokenTTLSeconds, DefaultHumanTokenTTLSeconds)
+	}
+	if cfg.LocalSessionTTLSeconds != DefaultLocalSessionTTLSeconds {
+		t.Fatalf("LocalSessionTTLSeconds = %d, want %d", cfg.LocalSessionTTLSeconds, DefaultLocalSessionTTLSeconds)
+	}
+}
+
+func TestLoad_SeedAgentRequiresAllFields(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"seed_agents":[{"client_id":"a"}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for a seed_agents entry missing client_secret/name")
+	}
+}
+
+func TestLoad_ValidSeedAgentAccepted(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"seed_agents":[{"client_id":"a","client_secret":"s","name":"n"}]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.SeedAgents) != 1 || cfg.SeedAgents[0].ClientID != "a" {
+		t.Fatalf("SeedAgents = %+v", cfg.SeedAgents)
+	}
+}
+
+func TestLoad_ExplicitIssuerNotOverridden(t *testing.T) {
+	path := writeConfig(t, `{"issuer":"https://gateway.example.com","nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Issuer != "https://gateway.example.com" {
+		t.Fatalf("Issuer = %q, want the explicit value preserved", cfg.Issuer)
+	}
+}

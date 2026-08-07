@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,31 @@ import (
 	"time"
 
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
+	"github.com/sumeetgp/spidercob-gateway/internal/policy"
 )
+
+// testBearerToken and fakeValidator stand in for a real authserver in
+// every test below that isn't itself about authentication (session
+// mapping, stdio routing, crash handling, ...) -- those get their own
+// dedicated tests against a real *authserver.AuthServer further down.
+// Likewise gw.policy is overridden back to AllowAll after construction:
+// New's real default is policy.DenyAll{} (issue #3), correct for
+// production, but these tests are isolating session/routing/stdio
+// behavior, not policy enforcement.
+const testBearerToken = "test-token"
+
+type fakeValidator struct{}
+
+func (fakeValidator) ValidateAccessToken(node, token string) (AuthClaims, error) {
+	if token != testBearerToken {
+		return AuthClaims{}, errors.New("fakeValidator: invalid token")
+	}
+	return AuthClaims{Subject: "user:test"}, nil
+}
+
+func authorize(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+testBearerToken)
+}
 
 func newStdioTestGateway(t *testing.T) *Gateway {
 	t.Helper()
@@ -27,10 +52,11 @@ func newStdioTestGateway(t *testing.T) *Gateway {
 			},
 		},
 	}
-	gw, err := New(cfg)
+	gw, err := New(cfg, fakeValidator{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw.policy = policy.AllowAll{}
 	t.Cleanup(func() {
 		if err := gw.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -101,10 +127,11 @@ func newHTTPTestGateway(t *testing.T, upstreamURL string) *Gateway {
 			{Name: "jira", Transport: config.TransportStreamableHTTP, UpstreamURL: upstreamURL},
 		},
 	}
-	gw, err := New(cfg)
+	gw, err := New(cfg, fakeValidator{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw.policy = policy.AllowAll{}
 	t.Cleanup(func() {
 		if err := gw.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -117,6 +144,7 @@ func initialize(t *testing.T, gw *Gateway, node string) (sessionID string, resp 
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp/"+node+"/", strings.NewReader(body))
+	authorize(req)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -131,6 +159,7 @@ func initialize(t *testing.T, gw *Gateway, node string) (sessionID string, resp 
 
 func doWithSession(gw *Gateway, node, sessionID, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/mcp/"+node+"/", strings.NewReader(body))
+	authorize(req)
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
@@ -256,6 +285,7 @@ func TestGateway_DeleteTearsDownUpstreamSessionAndRejectsReuse(t *testing.T) {
 	sessionID, _ := initialize(t, gw, "jira")
 
 	req := httptest.NewRequest(http.MethodDelete, "/mcp/jira/", nil)
+	authorize(req)
 	req.Header.Set("Mcp-Session-Id", sessionID)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
@@ -283,6 +313,7 @@ func TestGateway_StdioSessionDeleteKillsChildProcess(t *testing.T) {
 	sessionID, _ := initialize(t, gw, "echo")
 
 	req := httptest.NewRequest(http.MethodDelete, "/mcp/echo/", nil)
+	authorize(req)
 	req.Header.Set("Mcp-Session-Id", sessionID)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
@@ -312,10 +343,11 @@ func TestGateway_StdioCrashMidSessionFailsCleanlyThenSelfHeals(t *testing.T) {
 			{Name: "crash", Transport: config.TransportStdio, Command: "go", Args: []string{"run", "./stdioadapter/testdata/crashserver"}},
 		},
 	}
-	gw, err := New(cfg)
+	gw, err := New(cfg, fakeValidator{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw.policy = policy.AllowAll{}
 	t.Cleanup(func() {
 		if err := gw.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -370,10 +402,11 @@ func TestGateway_StdioSpawnFailureTriggersBackoffOnNextAttempt(t *testing.T) {
 			{Name: "broken", Transport: config.TransportStdio, Command: "go", Args: []string{"run", "./stdioadapter/testdata/failserver"}},
 		},
 	}
-	gw, err := New(cfg)
+	gw, err := New(cfg, fakeValidator{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw.policy = policy.AllowAll{}
 	t.Cleanup(func() {
 		if err := gw.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -383,6 +416,7 @@ func TestGateway_StdioSpawnFailureTriggersBackoffOnNextAttempt(t *testing.T) {
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 
 	req1 := httptest.NewRequest(http.MethodPost, "/mcp/broken/", strings.NewReader(initBody))
+	authorize(req1)
 	rec1 := httptest.NewRecorder()
 	gw.ServeHTTP(rec1, req1)
 	if rec1.Code != http.StatusBadGateway {
@@ -390,6 +424,7 @@ func TestGateway_StdioSpawnFailureTriggersBackoffOnNextAttempt(t *testing.T) {
 	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/mcp/broken/", strings.NewReader(initBody))
+	authorize(req2)
 	rec2 := httptest.NewRecorder()
 	gw.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusServiceUnavailable {
@@ -410,10 +445,11 @@ func TestGateway_StdioNodeQuarantinedAfterRepeatedFailures(t *testing.T) {
 			{Name: "broken", Transport: config.TransportStdio, Command: "go", Args: []string{"run", "./stdioadapter/testdata/failserver"}},
 		},
 	}
-	gw, err := New(cfg)
+	gw, err := New(cfg, fakeValidator{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	gw.policy = policy.AllowAll{}
 	t.Cleanup(func() {
 		if err := gw.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -427,6 +463,7 @@ func TestGateway_StdioNodeQuarantinedAfterRepeatedFailures(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/mcp/broken/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	authorize(req)
 	rec := httptest.NewRecorder()
 	gw.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {

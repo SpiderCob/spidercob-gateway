@@ -1,15 +1,34 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/authserver"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
+	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy"
+	"github.com/sumeetgp/spidercob-gateway/internal/store"
 )
+
+// authValidator adapts *authserver.AuthServer to proxy.TokenValidator so
+// internal/proxy never needs to import internal/authserver directly --
+// this composition root is the only place that wires the two together.
+type authValidator struct{ as *authserver.AuthServer }
+
+func (a authValidator) ValidateAccessToken(node, token string) (proxy.AuthClaims, error) {
+	c, err := a.as.ValidateAccessToken(node, token)
+	if err != nil {
+		return proxy.AuthClaims{}, err
+	}
+	return proxy.AuthClaims{Subject: c.Subject, Act: c.Act}, nil
+}
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to gateway config file")
@@ -25,7 +44,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	gw, err := proxy.New(cfg)
+	db, err := store.Open(cfg.StoreDBPath)
+	if err != nil {
+		slog.Error("failed to open store", "path", cfg.StoreDBPath, "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	identitySvc := identity.NewService(db)
+
+	for _, seed := range cfg.SeedAgents {
+		_, err := identitySvc.CreateAgentWithCredentials(context.Background(), seed.ClientID, seed.ClientSecret, seed.Name)
+		switch {
+		case err == nil:
+			slog.Info("seeded agent", "client_id", seed.ClientID, "name", seed.Name)
+		case errors.Is(err, store.ErrConflict):
+			// Already seeded on a previous startup -- fine, idempotent.
+		default:
+			slog.Error("failed to seed agent", "client_id", seed.ClientID, "err", err)
+			os.Exit(1)
+		}
+	}
+
+	nodeNames := make([]string, 0, len(cfg.Nodes))
+	for _, n := range cfg.Nodes {
+		nodeNames = append(nodeNames, n.Name)
+	}
+
+	as, err := authserver.New(context.Background(), authserver.Config{
+		Issuer:          cfg.Issuer,
+		Nodes:           nodeNames,
+		Identity:        identitySvc,
+		Store:           db,
+		NHITokenTTL:     time.Duration(cfg.NHITokenTTLSeconds) * time.Second,
+		HumanTokenTTL:   time.Duration(cfg.HumanTokenTTLSeconds) * time.Second,
+		LocalSessionTTL: time.Duration(cfg.LocalSessionTTLSeconds) * time.Second,
+	})
+	if err != nil {
+		slog.Error("failed to build authserver", "err", err)
+		os.Exit(1)
+	}
+
+	gw, err := proxy.New(cfg, authValidator{as: as})
 	if err != nil {
 		slog.Error("failed to build proxy", "err", err)
 		os.Exit(1)
@@ -37,16 +97,19 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		// TODO(phase 1): add store.Ping() once the sqlite store lands.
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("store unavailable"))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
 	mux.Handle("/metrics", metrics.Handler())
-	// TODO(phase 2): /token endpoint (RFC 7523 ID-JAG grant + internal exchange),
-	// /.well-known/oauth-protected-resource/{node} (RFC 9728), JWKS.
+	mux.Handle("/", as.Routes()) // /token, JWKS, RFC 9728 metadata
 	mux.Handle("/mcp/", gw)
 
-	slog.Info("spidercob gateway listening", "addr", cfg.Listen, "nodes", len(cfg.Nodes))
+	slog.Info("spidercob gateway listening", "addr", cfg.Listen, "nodes", len(cfg.Nodes), "issuer", cfg.Issuer)
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
 		slog.Error("server exited", "err", err)
 		os.Exit(1)

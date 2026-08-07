@@ -47,12 +47,44 @@ type nodeConfig struct {
 	args        []string
 }
 
+// AuthClaims is the subset of a validated access token's claims the proxy
+// itself needs -- just enough to stash into the request context for
+// Phase 3's policy engine (issue #3, story 22), without the proxy package
+// needing to import internal/authserver's full Claims type.
+type AuthClaims struct {
+	Subject string // sub: "user:<username>" or "agent:<client_id>"
+	Act     string // act: the calling agent's client_id, when a human uses one (RFC 8693 shape; unpopulated until Phase 2b)
+}
+
+// TokenValidator is what the proxy needs from an authserver: given the
+// node being called and a bearer token, either a validated identity or an
+// error. Defined here, not in internal/authserver, so this package's
+// dependency surface stays minimal -- main.go is the only place that needs
+// to know an *authserver.AuthServer actually implements this.
+type TokenValidator interface {
+	ValidateAccessToken(node, token string) (AuthClaims, error)
+}
+
+// authCtxKey is the context key AuthClaims are stored under after a
+// request's bearer token validates -- Phase 3's policy engine reads this
+// instead of re-parsing the token.
+type authCtxKey struct{}
+
+// AuthClaimsFromContext returns the AuthClaims stashed by a successful
+// bearer-token validation, if any.
+func AuthClaimsFromContext(ctx context.Context) (AuthClaims, bool) {
+	c, ok := ctx.Value(authCtxKey{}).(AuthClaims)
+	return c, ok
+}
+
 type Gateway struct {
 	nodes    map[string]*nodeConfig
 	sessions *sessionManager
 	policy   policy.Engine
 	scanners *scan.Chain
 	client   *http.Client
+	authn    TokenValidator
+	issuer   string
 
 	nodeHealthMu sync.Mutex
 	nodeHealth   map[string]*nodeHealth
@@ -61,13 +93,26 @@ type Gateway struct {
 	reaperDone chan struct{}
 }
 
-func New(cfg *config.Config) (*Gateway, error) {
+// New builds a Gateway. authn validates every request's bearer token
+// (issue #3) -- there is no way to construct a Gateway that skips this;
+// the TODO(phase 2) placeholder this replaces is gone, not made optional.
+func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
+	if authn == nil {
+		return nil, fmt.Errorf("proxy: a TokenValidator is required")
+	}
+	var initialPolicy policy.Engine = policy.DenyAll{} // phase 2: nothing is allowed until Phase 3's real evaluator lands (MASTER_PLAN.md §6, 2026-08-04)
+	if cfg.DevAllowAllPolicy {
+		slog.Warn("DevAllowAllPolicy is enabled -- every authenticated caller can reach every tool on every node; never set this in production")
+		initialPolicy = policy.AllowAll{}
+	}
 	g := &Gateway{
 		nodes:      make(map[string]*nodeConfig),
 		sessions:   newSessionManager(time.Duration(cfg.IdleSessionTimeoutSeconds) * time.Second),
-		policy:     policy.AllowAll{}, // replaced in phase 3
+		policy:     initialPolicy,
 		scanners:   scan.Default(),
 		client:     &http.Client{Timeout: 30 * time.Second},
+		authn:      authn,
+		issuer:     strings.TrimRight(cfg.Issuer, "/"),
 		nodeHealth: make(map[string]*nodeHealth),
 		stopReaper: make(chan struct{}),
 		reaperDone: make(chan struct{}),
@@ -151,9 +196,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO(phase 2): validate bearer token here — signature, exp, aud == this
-	// node's canonical URI (RFC 8707), jti not revoked. On 401, return
-	// WWW-Authenticate pointing at RFC 9728 protected-resource metadata.
+	// Validate bearer token: signature, exp, aud == this node's canonical
+	// URI (RFC 8707), jti not revoked. Missing or invalid -> 401 with
+	// WWW-Authenticate pointing at this node's RFC 9728 protected-resource
+	// metadata, so a spec-compliant client knows how to obtain a valid one.
+	claims, ok := g.authenticate(sr, r, nodeName)
+	if !ok {
+		return
+	}
+	r = r.WithContext(context.WithValue(r.Context(), authCtxKey{}, claims))
 
 	if !g.policy.Allow(nodeName, r) {
 		http.Error(sr, "forbidden", http.StatusForbidden)
@@ -224,6 +275,31 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.touch()
 	g.forward(sr, r, sess, false)
+}
+
+// authenticate validates the request's bearer token against nodeName. On
+// failure it writes the 401 response itself (with a WWW-Authenticate
+// header pointing at this node's RFC 9728 metadata) and returns ok=false;
+// the caller should return immediately without writing anything else.
+func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, nodeName string) (AuthClaims, bool) {
+	wwwAuthenticate := fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/%s"`, g.issuer, nodeName)
+
+	authz := r.Header.Get("Authorization")
+	token, hasBearer := strings.CutPrefix(authz, "Bearer ")
+	if !hasBearer || token == "" {
+		w.Header().Set("WWW-Authenticate", wwwAuthenticate)
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return AuthClaims{}, false
+	}
+
+	claims, err := g.authn.ValidateAccessToken(nodeName, token)
+	if err != nil {
+		slog.Warn("bearer token rejected", "node", nodeName, "err", err)
+		w.Header().Set("WWW-Authenticate", wwwAuthenticate)
+		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+		return AuthClaims{}, false
+	}
+	return claims, true
 }
 
 func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *nodeConfig) {
