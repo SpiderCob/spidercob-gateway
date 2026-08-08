@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
 )
@@ -97,6 +98,10 @@ func (a *AdminAPI) Routes() http.Handler {
 
 	mux.HandleFunc("GET /admin/policies", a.gate(a.listPolicies))
 	mux.HandleFunc("PUT /admin/policies", a.gate(a.replacePolicies))
+
+	mux.HandleFunc("GET /admin/nodes", a.gate(a.listNodes))
+	mux.HandleFunc("POST /admin/nodes", a.gate(a.createNode))
+	mux.HandleFunc("DELETE /admin/nodes/{name}", a.gate(a.deleteNode))
 	return mux
 }
 
@@ -487,5 +492,122 @@ func (a *AdminAPI) replacePolicies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logAdminAction(r, "replace_policies", fmt.Sprintf("%d rules", len(newPolicies)))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Nodes (issue #15) ---
+
+type nodeResponse struct {
+	Name                      string   `json:"name"`
+	Transport                 string   `json:"transport"`
+	UpstreamURL               *string  `json:"upstream_url,omitempty"`
+	Command                   *string  `json:"command,omitempty"`
+	Args                      []string `json:"args,omitempty"`
+	PinRefreshIntervalSeconds *int     `json:"pin_refresh_interval_seconds,omitempty"`
+	Source                    string   `json:"source"`
+	CreatedAt                 string   `json:"created_at"`
+}
+
+func toNodeResponse(n store.Node) nodeResponse {
+	return nodeResponse{
+		Name: n.Name, Transport: n.Transport, UpstreamURL: n.UpstreamURL, Command: n.Command,
+		Args: n.Args, PinRefreshIntervalSeconds: n.PinRefreshIntervalSeconds, Source: n.Source,
+		CreatedAt: n.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (a *AdminAPI) listNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := a.store.ListNodes(r.Context())
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to list nodes")
+		return
+	}
+	out := make([]nodeResponse, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, toNodeResponse(n))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type createNodeRequest struct {
+	Name                      string   `json:"name"`
+	Transport                 string   `json:"transport,omitempty"`
+	UpstreamURL               string   `json:"upstream_url,omitempty"`
+	Command                   string   `json:"command,omitempty"`
+	Args                      []string `json:"args,omitempty"`
+	PinRefreshIntervalSeconds int      `json:"pin_refresh_interval_seconds,omitempty"`
+}
+
+// createNode reuses config.ValidateNode -- the exact per-transport
+// validation config.Load already enforces for config.json-declared
+// nodes, so the two entry points can never silently diverge on what
+// counts as a valid node (story 10). Always creates a "admin"-sourced
+// row; a node registered this way is persisted and listed immediately,
+// but -- like every node -- only becomes reachable via /mcp/<name>/ or
+// mintable via /token after the next gateway restart (story 8; no hot-
+// reload yet, MASTER_PLAN.md §6, 2026-08-08).
+func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
+	var req createNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	validated, err := config.ValidateNode(config.Node{
+		Name: req.Name, Transport: req.Transport, UpstreamURL: req.UpstreamURL,
+		Command: req.Command, Args: req.Args, PinRefreshIntervalSeconds: req.PinRefreshIntervalSeconds,
+	})
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sn := store.Node{Name: validated.Name, Transport: validated.Transport, Args: validated.Args, Source: store.NodeSourceAdmin}
+	if validated.UpstreamURL != "" {
+		sn.UpstreamURL = &validated.UpstreamURL
+	}
+	if validated.Command != "" {
+		sn.Command = &validated.Command
+	}
+	if validated.PinRefreshIntervalSeconds > 0 {
+		sn.PinRefreshIntervalSeconds = &validated.PinRefreshIntervalSeconds
+	}
+
+	created, err := a.store.CreateNode(r.Context(), sn)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeAdminError(w, http.StatusConflict, "a node with this name already exists")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "failed to create node")
+		return
+	}
+	logAdminAction(r, "create_node", created.Name)
+	writeJSON(w, http.StatusCreated, toNodeResponse(created))
+}
+
+// deleteNode refuses to delete a "config"-sourced node (story 5): doing
+// so via this API would just have it reappear on the very next restart,
+// since config.json is upserted back into the store on every startup.
+func (a *AdminAPI) deleteNode(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	existing, err := a.store.GetNodeByName(r.Context(), name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeAdminError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to look up node")
+		return
+	}
+	if existing.Source == store.NodeSourceConfig {
+		writeAdminError(w, http.StatusConflict, "this node is defined in config.json; remove it there instead")
+		return
+	}
+	if err := a.store.DeleteNode(r.Context(), name); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to delete node")
+		return
+	}
+	logAdminAction(r, "delete_node", name)
 	w.WriteHeader(http.StatusNoContent)
 }

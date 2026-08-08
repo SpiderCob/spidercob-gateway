@@ -2,7 +2,7 @@
 
 **The open-source MCP gateway for teams without an IAM department** — enterprise-grade agent identity (ID-JAG / MCP Enterprise-Managed Authorization) and traffic inspection, in one container.
 
-> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, Phase 3 complete, Phase 4 underway** — real identity/token issuance across all three modes (local, NHI, external IdP), a real group/method/tool policy engine (authorized calls actually succeed, unauthorized ones are rejected and hidden from `tools/list`), tool pinning (every node's tools are trusted on first observation and re-checked in the background, so a tool mutated after approval — a "rug pull" — gets quarantined, blocked and hidden, automatically), schema-enforced tool calls plus a rounder DLP pipeline (Luhn-checked cards, plausibility-filtered SSNs, an entropy scorer, homoglyph/zero-width-evasion-resistant injection detection), and now a real HTTP admin API for agents/groups/policies — trusted via a service-to-service NHI token plus a live spider-snoop session check, no separate gateway login. The actual admin **UI** doesn't exist yet — `/admin/*` is a real, usable HTTP backend today, config-file authoring still works too. Not production-ready.
+> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, Phase 3 complete, Phase 4 underway** — real identity/token issuance across all three modes (local, NHI, external IdP), a real group/method/tool policy engine (authorized calls actually succeed, unauthorized ones are rejected and hidden from `tools/list`), tool pinning (every node's tools are trusted on first observation and re-checked in the background, so a tool mutated after approval — a "rug pull" — gets quarantined, blocked and hidden, automatically), schema-enforced tool calls plus a rounder DLP pipeline (Luhn-checked cards, plausibility-filtered SSNs, an entropy scorer, homoglyph/zero-width-evasion-resistant injection detection), a real HTTP admin API for agents/groups/policies — trusted via a service-to-service NHI token plus a live spider-snoop session check, no separate gateway login — and now real node registration over that same admin API (`POST /admin/nodes`, persisted, survives restart; a config-declared node still wins on conflict, and a restart is required before a newly-registered node actually routes traffic — no hot-reload yet). The actual admin **UI** doesn't exist yet — `/admin/*` is a real, usable HTTP backend today, config-file authoring still works too. Not production-ready.
 
 ## Why
 
@@ -67,7 +67,8 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 3b: tool pinning (TOFU + background drift detection, rug-pull defense)
 - [x] Phase 3c: scan upgrades (schema enforcement, entropy, PII, homoglyph) — **Phase 3 complete**
 - [x] Phase 4a: `internal/adminapi` v0 — HTTP admin API (agents/groups/policies), spider-snoop-integrated auth, no UI yet
-- [ ] Phase 4b: the actual admin UI, node registration, CSV users, docker packaging → **OSS launch**
+- [x] Phase 4b: node registration — `POST/GET/DELETE /admin/nodes`, persisted, config-sourced nodes win on conflict, restart-required (no hot-reload), proven via a real process-restart e2e
+- [ ] Phase 4c: the actual admin UI, CSV users, docker packaging → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing

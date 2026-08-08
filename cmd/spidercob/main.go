@@ -62,6 +62,44 @@ func getOrCreateGroup(db store.Store, name string) (store.Group, error) {
 	return db.GetGroupByName(context.Background(), name)
 }
 
+// configNodeToStoreNode converts a config.json-declared node into the
+// store.Node shape UpsertConfigNode accepts -- Source is left unset here,
+// UpsertConfigNode always sets it to store.NodeSourceConfig itself
+// (issue #15).
+func configNodeToStoreNode(n config.Node) store.Node {
+	sn := store.Node{Name: n.Name, Transport: n.Transport, Args: n.Args}
+	if n.UpstreamURL != "" {
+		sn.UpstreamURL = &n.UpstreamURL
+	}
+	if n.Command != "" {
+		sn.Command = &n.Command
+	}
+	if n.PinRefreshIntervalSeconds > 0 {
+		sn.PinRefreshIntervalSeconds = &n.PinRefreshIntervalSeconds
+	}
+	return sn
+}
+
+// storeNodeToConfigNode is configNodeToStoreNode's inverse -- once every
+// node (config- and admin-sourced alike) lives in the store, this is how
+// cmd/spidercob builds the config.Node list that proxy.New/
+// authserver.Config.Nodes/the pin scheduler already know how to consume,
+// with zero changes required inside any of those three packages
+// (issue #15).
+func storeNodeToConfigNode(n store.Node) config.Node {
+	cn := config.Node{Name: n.Name, Transport: n.Transport, Args: n.Args}
+	if n.UpstreamURL != nil {
+		cn.UpstreamURL = *n.UpstreamURL
+	}
+	if n.Command != nil {
+		cn.Command = *n.Command
+	}
+	if n.PinRefreshIntervalSeconds != nil {
+		cn.PinRefreshIntervalSeconds = *n.PinRefreshIntervalSeconds
+	}
+	return cn
+}
+
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to gateway config file")
 	flag.Parse()
@@ -145,6 +183,32 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("policy config applied", "rules", len(newPolicies))
+
+	// Node bootstrap (issue #15): config.json stays authoritative for its
+	// own nodes -- each is upserted into the store on every startup
+	// (store.UpsertConfigNode refuses to clobber a same-named node an
+	// admin registered via the API instead). The FULL current set (config-
+	// and admin-sourced alike) then replaces cfg.Nodes for every
+	// downstream construction step below, so proxy.New/authserver.New/the
+	// pin scheduler need zero internal changes to pick up admin-registered
+	// nodes -- on the *next* startup. A node created via POST /admin/nodes
+	// while the gateway is already running has no effect on this running
+	// process; there is no hot-reload yet (MASTER_PLAN.md §6, 2026-08-08).
+	for _, n := range cfg.Nodes {
+		if _, err := db.UpsertConfigNode(context.Background(), configNodeToStoreNode(n)); err != nil {
+			slog.Error("failed to bootstrap config-defined node into the store", "node", n.Name, "err", err)
+			os.Exit(1)
+		}
+	}
+	storedNodes, err := db.ListNodes(context.Background())
+	if err != nil {
+		slog.Error("failed to list nodes", "err", err)
+		os.Exit(1)
+	}
+	cfg.Nodes = make([]config.Node, 0, len(storedNodes))
+	for _, n := range storedNodes {
+		cfg.Nodes = append(cfg.Nodes, storeNodeToConfigNode(n))
+	}
 
 	nodeNames := make([]string, 0, len(cfg.Nodes))
 	for _, n := range cfg.Nodes {

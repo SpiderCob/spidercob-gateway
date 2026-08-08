@@ -555,6 +555,132 @@ func (s *SQLiteStore) ToolPinsForNode(ctx context.Context, node string) ([]ToolP
 	return out, rows.Err()
 }
 
+func (s *SQLiteStore) CreateNode(ctx context.Context, n Node) (Node, error) {
+	argsJSON, err := marshalNodeArgs(n.Args)
+	if err != nil {
+		return Node{}, err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO mcp_nodes (name, transport, upstream_url, command, args, pin_refresh_interval_seconds, source)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		n.Name, n.Transport, n.UpstreamURL, n.Command, argsJSON, n.PinRefreshIntervalSeconds, n.Source)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Node{}, ErrConflict
+		}
+		return Node{}, err
+	}
+	return s.GetNodeByName(ctx, n.Name)
+}
+
+func (s *SQLiteStore) GetNodeByName(ctx context.Context, name string) (Node, error) {
+	var n Node
+	var argsJSON *string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, transport, upstream_url, command, args, pin_refresh_interval_seconds, source, created_at
+		 FROM mcp_nodes WHERE name = ?`, name,
+	).Scan(&n.ID, &n.Name, &n.Transport, &n.UpstreamURL, &n.Command, &argsJSON, &n.PinRefreshIntervalSeconds, &n.Source, &n.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Node{}, ErrNotFound
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	if err := unmarshalNodeArgs(argsJSON, &n); err != nil {
+		return Node{}, err
+	}
+	return n, nil
+}
+
+// UpsertConfigNode: see the Store interface's doc comment for the full
+// "config stays authoritative for its own rows, never silently
+// overwrites an admin-registered one" contract.
+func (s *SQLiteStore) UpsertConfigNode(ctx context.Context, n Node) (Node, error) {
+	existing, err := s.GetNodeByName(ctx, n.Name)
+	if errors.Is(err, ErrNotFound) {
+		n.Source = NodeSourceConfig
+		return s.CreateNode(ctx, n)
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	if existing.Source != NodeSourceConfig {
+		return Node{}, ErrConflict
+	}
+	argsJSON, err := marshalNodeArgs(n.Args)
+	if err != nil {
+		return Node{}, err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE mcp_nodes SET transport = ?, upstream_url = ?, command = ?, args = ?, pin_refresh_interval_seconds = ?
+		 WHERE name = ?`,
+		n.Transport, n.UpstreamURL, n.Command, argsJSON, n.PinRefreshIntervalSeconds, n.Name,
+	); err != nil {
+		return Node{}, err
+	}
+	return s.GetNodeByName(ctx, n.Name)
+}
+
+func (s *SQLiteStore) ListNodes(ctx context.Context) ([]Node, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, transport, upstream_url, command, args, pin_refresh_interval_seconds, source, created_at
+		 FROM mcp_nodes ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Node
+	for rows.Next() {
+		var n Node
+		var argsJSON *string
+		if err := rows.Scan(&n.ID, &n.Name, &n.Transport, &n.UpstreamURL, &n.Command, &argsJSON, &n.PinRefreshIntervalSeconds, &n.Source, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := unmarshalNodeArgs(argsJSON, &n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteNode(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM mcp_nodes WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func marshalNodeArgs(args []string) (any, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("marshal node args: %w", err)
+	}
+	return string(b), nil
+}
+
+func unmarshalNodeArgs(argsJSON *string, n *Node) error {
+	if argsJSON == nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(*argsJSON), &n.Args); err != nil {
+		return fmt.Errorf("unmarshal args for node %s: %w", n.Name, err)
+	}
+	return nil
+}
+
 // isUniqueConstraint reports whether err came from a UNIQUE constraint
 // violation. modernc.org/sqlite doesn't export a typed error for this, so
 // this falls back to matching the driver's message text.

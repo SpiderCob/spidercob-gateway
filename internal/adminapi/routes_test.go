@@ -448,3 +448,129 @@ func TestReplacePolicies_InvalidRuleTypeRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// --- Nodes (issue #15) ---
+
+func TestCreateNode_StreamableHTTP_Succeeds(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	body, _ := json.Marshal(createNodeRequest{Name: "jira", Transport: "streamable_http", UpstreamURL: "http://localhost:3001"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp nodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Name != "jira" || resp.Source != store.NodeSourceAdmin {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.UpstreamURL == nil || *resp.UpstreamURL != "http://localhost:3001" {
+		t.Fatalf("UpstreamURL = %v, want http://localhost:3001", resp.UpstreamURL)
+	}
+
+	got, err := s.GetNodeByName(context.Background(), "jira")
+	if err != nil {
+		t.Fatalf("node not actually persisted: %v", err)
+	}
+	if got.Source != store.NodeSourceAdmin {
+		t.Fatalf("Source = %q, want %q", got.Source, store.NodeSourceAdmin)
+	}
+}
+
+func TestCreateNode_Stdio_Succeeds(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	body, _ := json.Marshal(createNodeRequest{Name: "local", Transport: "stdio", Command: "go", Args: []string{"run", "./x"}})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateNode_MissingUpstreamURLRejected(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	body, _ := json.Marshal(createNodeRequest{Name: "jira", Transport: "streamable_http"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateNode_UnknownTransportRejected(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	body, _ := json.Marshal(createNodeRequest{Name: "jira", Transport: "carrier-pigeon"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateNode_NameCollisionRejected(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	if _, err := s.CreateNode(context.Background(), store.Node{Name: "jira", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a"), Source: store.NodeSourceAdmin}); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	body, _ := json.Marshal(createNodeRequest{Name: "jira", Transport: "streamable_http", UpstreamURL: "http://b"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListNodes_ReturnsCreatedNodes(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	ctx := context.Background()
+	if _, err := s.CreateNode(ctx, store.Node{Name: "a", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a"), Source: store.NodeSourceAdmin}); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	if _, err := s.UpsertConfigNode(ctx, store.Node{Name: "b", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://b")}); err != nil {
+		t.Fatalf("UpsertConfigNode: %v", err)
+	}
+
+	rec := fullyAuthedRequest(api, "GET", "/admin/nodes", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var nodes []nodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &nodes); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("nodes = %+v, want 2 (config- and admin-sourced alike)", nodes)
+	}
+}
+
+func TestDeleteNode_AdminSourced_Succeeds(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	if _, err := s.CreateNode(context.Background(), store.Node{Name: "throwaway", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a"), Source: store.NodeSourceAdmin}); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/nodes/throwaway", nil)
+	if rec.Code != 204 {
+		t.Fatalf("status = %d, want 204, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteNode_ConfigSourced_Rejected(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	if _, err := s.UpsertConfigNode(context.Background(), store.Node{Name: "jira", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a")}); err != nil {
+		t.Fatalf("UpsertConfigNode: %v", err)
+	}
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/nodes/jira", nil)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := s.GetNodeByName(context.Background(), "jira"); err != nil {
+		t.Fatalf("config-sourced node must still exist after a refused delete: %v", err)
+	}
+}
+
+func TestDeleteNode_UnknownRejected(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/nodes/never-existed", nil)
+	if rec.Code != 404 {
+		t.Fatalf("status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func strPtrForTest(s string) *string { return &s }

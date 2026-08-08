@@ -261,7 +261,8 @@ func TestExternalIdentityResolveOrCreate_ConcurrentFirstLoginNoDuplicate(t *test
 	}
 }
 
-func intPtr(i int) *int { return &i }
+func intPtr(i int) *int       { return &i }
+func strPtr(s string) *string { return &s }
 
 func TestToolPin_CreateGetQuarantine(t *testing.T) {
 	s := openTestStore(t)
