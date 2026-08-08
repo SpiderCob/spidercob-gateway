@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Transport identifies how the gateway reaches a node's upstream.
@@ -26,6 +27,42 @@ type Node struct {
 	// and a frequently-updated third-party server can have different
 	// staleness tolerances). Zero means "use the config-level default."
 	PinRefreshIntervalSeconds int `json:"pin_refresh_interval_seconds,omitempty"`
+}
+
+// ValidateNode validates n and returns a normalized copy (Transport
+// defaulted to TransportStreamableHTTP if unset) -- the exact per-
+// transport validation config.Load's node loop always applied, now a
+// standalone, pure, reusable function (issue #15) so internal/adminapi's
+// node-creation endpoint enforces the identical rules without
+// duplicating them. Name must also be safe as a URL path segment
+// (routing is "/mcp/<name>/") and as the RFC 8707 resource-URI suffix
+// (issuer + "/mcp/" + name) -- no "/", no leading/trailing whitespace.
+func ValidateNode(n Node) (Node, error) {
+	if n.Name == "" {
+		return Node{}, fmt.Errorf("every node needs a name")
+	}
+	if strings.Contains(n.Name, "/") {
+		return Node{}, fmt.Errorf("node %s: name must not contain \"/\"", n.Name)
+	}
+	if strings.TrimSpace(n.Name) != n.Name {
+		return Node{}, fmt.Errorf("node %s: name must not have leading or trailing whitespace", n.Name)
+	}
+	if n.Transport == "" {
+		n.Transport = TransportStreamableHTTP
+	}
+	switch n.Transport {
+	case TransportStreamableHTTP:
+		if n.UpstreamURL == "" {
+			return Node{}, fmt.Errorf("node %s: streamable_http nodes need upstream_url", n.Name)
+		}
+	case TransportStdio:
+		if n.Command == "" {
+			return Node{}, fmt.Errorf("node %s: stdio nodes need command", n.Name)
+		}
+	default:
+		return Node{}, fmt.Errorf("node %s: unknown transport %q", n.Name, n.Transport)
+	}
+	return n, nil
 }
 
 // DefaultIdleSessionTimeoutSeconds is used when idle_session_timeout_seconds
@@ -298,25 +335,11 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	for i, n := range c.Nodes {
-		if n.Name == "" {
-			return nil, fmt.Errorf("every node needs a name")
+		validated, err := ValidateNode(n)
+		if err != nil {
+			return nil, err
 		}
-		if n.Transport == "" {
-			n.Transport = TransportStreamableHTTP
-		}
-		switch n.Transport {
-		case TransportStreamableHTTP:
-			if n.UpstreamURL == "" {
-				return nil, fmt.Errorf("node %s: streamable_http nodes need upstream_url", n.Name)
-			}
-		case TransportStdio:
-			if n.Command == "" {
-				return nil, fmt.Errorf("node %s: stdio nodes need command", n.Name)
-			}
-		default:
-			return nil, fmt.Errorf("node %s: unknown transport %q", n.Name, n.Transport)
-		}
-		c.Nodes[i] = n
+		c.Nodes[i] = validated
 	}
 	for _, a := range c.SeedAgents {
 		if a.ClientID == "" || a.ClientSecret == "" || a.Name == "" {

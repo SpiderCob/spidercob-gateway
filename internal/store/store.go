@@ -1,21 +1,25 @@
 // Package store abstracts persistence. SQLite (modernc.org/sqlite, no cgo)
 // is the phase-2 implementation; Postgres arrives with HA (design doc §8).
 //
-// Scope as of Phase 4 (issue #13): users, agents (NHI, now soft-revocable
-// via RevokedAt), groups (now deletable, membership now removable),
-// user_groups, agent_groups, revocations (issue #3), external_identities
-// (JIT-provisioned Mode B users, issue #5), policies (issue #7), and
-// tool_pins (issue #9). Trusted external-IdP config (idp_trust in design
-// doc §8) stays config-file-only, same bootstrap pattern as SeedAgents --
-// internal/adminapi (issue #13) manages agents/groups/policies over HTTP
-// now, but idp_trust still has no admin-managed equivalent; policies and
-// tool_pins are tables (not config-only) because both need a real query
-// surface on the hot path (PoliciesForGroups, GetToolPin), not just a
-// one-time bootstrap read -- and tool_pins specifically must survive a
-// restart unchanged (TOFU only applies to a genuinely new (node, tool)
-// pair) or the whole pinning defense is trivially bypassable. The
-// remaining Phase 3+ tables (mcp_nodes, sanitizer_profiles, audit_log)
-// are still out of scope here and land with the phases that need them.
+// Scope as of Phase 4b (issue #15): users, agents (NHI, now soft-
+// revocable via RevokedAt), groups (now deletable, membership now
+// removable), user_groups, agent_groups, revocations (issue #3),
+// external_identities (JIT-provisioned Mode B users, issue #5), policies
+// (issue #7), tool_pins (issue #9), and now mcp_nodes (issue #15: name,
+// transport, upstream_url/command/args, source "config"|"admin").
+// Trusted external-IdP config (idp_trust in design doc §8) stays
+// config-file-only, same bootstrap pattern config.Nodes itself used to
+// be -- internal/adminapi (issue #13) manages agents/groups/policies/
+// nodes over HTTP now, but idp_trust still has no admin-managed
+// equivalent. Unlike policies (fully replaced from config on every
+// startup, no independent state of its own) or tool_pins (never touched
+// by config, must survive a restart unchanged or TOFU is trivially
+// bypassed), mcp_nodes splits the difference by row: "config"-sourced
+// rows are upserted from config.Nodes on every startup (config stays
+// authoritative for those specifically), "admin"-sourced rows are never
+// touched by the config bootstrap at all. The remaining Phase 3+ tables
+// (sanitizer_profiles, audit_log) are still out of scope here and land
+// with the phases that need them.
 package store
 
 import (
@@ -139,6 +143,31 @@ type ToolPin struct {
 	DriftDetail   *string
 }
 
+// Node is one MCP server registered behind the gateway (issue #15).
+// Source distinguishes a config.json-bootstrapped row ("config",
+// upserted and kept authoritative on every startup via UpsertConfigNode
+// -- the same "config wins" posture Policies already has) from one
+// registered via the admin API ("admin" -- the only rows the admin API
+// itself may delete). UpstreamURL/Command are pointers, not plain
+// strings, because exactly one is meaningful per Transport, and the
+// column is genuinely NULL for the other case, not just empty.
+type Node struct {
+	ID                        int64
+	Name                      string
+	Transport                 string
+	UpstreamURL               *string
+	Command                   *string
+	Args                      []string
+	PinRefreshIntervalSeconds *int
+	Source                    string // "config" | "admin"
+	CreatedAt                 time.Time
+}
+
+const (
+	NodeSourceConfig = "config"
+	NodeSourceAdmin  = "admin"
+)
+
 // Revocation is one denylisted access-token jti, persisted so the
 // authserver's in-memory denylist survives a gateway restart.
 type Revocation struct {
@@ -247,6 +276,28 @@ type Store interface {
 	// quarantine set once per tools/list filter call rather than querying
 	// per tool name.
 	ToolPinsForNode(ctx context.Context, node string) ([]ToolPin, error)
+
+	// CreateNode registers a new node. Returns ErrConflict if a node with
+	// this name already exists, regardless of source.
+	CreateNode(ctx context.Context, n Node) (Node, error)
+	// GetNodeByName looks up one node. Returns ErrNotFound if none
+	// exists.
+	GetNodeByName(ctx context.Context, name string) (Node, error)
+	// UpsertConfigNode creates a "config"-sourced node, or -- if a node
+	// with this name already exists and is itself "config"-sourced --
+	// updates its transport/upstream_url/command/args/
+	// pin_refresh_interval_seconds in place. Returns ErrConflict if a
+	// node with this name already exists with source "admin" -- config
+	// must never silently overwrite an admin-registered node just
+	// because a later config.json happens to reuse its name.
+	UpsertConfigNode(ctx context.Context, n Node) (Node, error)
+	// ListNodes returns every node, any source, in a stable order.
+	ListNodes(ctx context.Context) ([]Node, error)
+	// DeleteNode removes a node by name. Returns ErrNotFound if none
+	// exists. Callers (internal/adminapi) are responsible for refusing to
+	// delete a "config"-sourced row -- this method is a dumb CRUD
+	// surface, not where that policy lives.
+	DeleteNode(ctx context.Context, name string) error
 
 	// RevokeJTI denylists a token's jti until expiresAt (its own natural
 	// expiry -- no point keeping a revocation past the point the token

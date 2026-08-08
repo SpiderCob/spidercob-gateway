@@ -76,6 +76,8 @@ instead of something re-typed by hand each time.
   store-visible effects via the same API afterward. Not part of
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-nodes.sh`** — issue #15's node registration (Phase 4b), against the real compiled binary, including a real process restart: a node is registered via `POST /admin/nodes` against a gateway running with zero configured MCP nodes, confirmed listed immediately, confirmed **not yet reachable** on the still-running process (`/mcp/echo/` 404s, and minting a per-node token for it fails) — then the same binary is actually killed and relaunched against the same `store_db_path`, and the node is confirmed reachable afterward: a real session, a real `tools/call`. Proves the "restart required, no hot-reload" behavior against the real process lifecycle, not just a doc comment. Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user
