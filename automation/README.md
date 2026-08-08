@@ -4,6 +4,18 @@ Scripts that make the CLAUDE.md development workflow ("TDD, tests green,
 then real end-to-end validation, then a PR") a real, runnable thing
 instead of something re-typed by hand each time.
 
+**Node.js prerequisite (issue #17):** the admin UI's frontend
+(`web/`, React+Vite+TS) is embedded into the gateway binary via
+`go:embed` (`internal/webui`). `go build`/`go vet`/`go test ./...` all
+still succeed without Node.js installed at all — `internal/webui/dist`
+carries a tracked `.gitkeep` placeholder specifically so a fresh clone
+never hard-fails just to run the Go test suite — but a binary built
+that way serves 404s under `/ui/`. `make build` and `make ci` both
+depend on a new `make web` target (`cd web && npm ci && npm run
+build`) so the default path always produces a real, UI-serving binary;
+run `make web` by hand first if you're invoking `go build` directly
+instead of going through `make`.
+
 - **`run-tests.sh`** — the fast local/CI check: `gofmt -l`, `go vet`,
   `go build`, `go test ./... -race -count=1`. This already includes
   in-process integration tests that spawn real fixture MCP servers (e.g.
@@ -77,6 +89,22 @@ instead of something re-typed by hand each time.
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
 - **`run-e2e-nodes.sh`** — issue #15's node registration (Phase 4b), against the real compiled binary, including a real process restart: a node is registered via `POST /admin/nodes` against a gateway running with zero configured MCP nodes, confirmed listed immediately, confirmed **not yet reachable** on the still-running process (`/mcp/echo/` 404s, and minting a per-node token for it fails) — then the same binary is actually killed and relaunched against the same `store_db_path`, and the node is confirmed reachable afterward: a real session, a real `tools/call`. Proves the "restart required, no hot-reload" behavior against the real process lifecycle, not just a doc comment. Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
+
+- **`run-e2e-adminui-session.sh`** — issue #17's admin UI session/cookie
+  path (Phase 4c-1), against the real compiled binary and the same
+  `fakespidersnoop` fixture issue #13's e2e uses: a browser-shaped caller
+  (a real curl cookie jar, never an NHI bearer token) logs in via
+  `POST /admin/ui/session`, gets a real `HttpOnly` cookie, and that
+  cookie alone drives real `/admin/agents`, `/admin/groups`, and
+  `/admin/policies` operations — but is confirmed rejected on
+  `/admin/nodes`, which stays service-to-service only. Also confirms the
+  pre-existing NHI-token-plus-header path is completely unaffected by
+  this addition, that logout actually invalidates the cookie, and that a
+  session expires on its own (a deliberately short 2s
+  `admin_ui_session_max_age_seconds`) without an explicit logout. Not
+  part of `make ci-interop` — no Docker needed, runs in `make ci`.
+  Requires `internal/webui/dist` to exist (`make web`, or `make ci`/
+  `make build`, which both depend on it) — see the note below.
 
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC

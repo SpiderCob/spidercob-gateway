@@ -104,6 +104,12 @@ const (
 	// spider-snoop logout is respected promptly, long enough that a burst
 	// of admin requests doesn't cost a live network call each.
 	DefaultSpiderSnoopIntrospectionCacheTTLSeconds = 30
+	// DefaultAdminUISessionMaxAgeSeconds bounds a browser admin UI
+	// session's total lifetime (issue #17, uisession.Registry) --
+	// independent of, and in addition to, the live per-request
+	// introspection re-check every UI-session-authenticated request
+	// still performs.
+	DefaultAdminUISessionMaxAgeSeconds = 8 * 60 * 60 // 8 hours, same order of magnitude as LocalSessionTTLSeconds
 )
 
 type Config struct {
@@ -210,6 +216,16 @@ type Config struct {
 	// when the admin integration is enabled but these are unset.
 	SpiderSnoopIntrospectionTimeoutSeconds  int `json:"spider_snoop_introspection_timeout_seconds,omitempty"`
 	SpiderSnoopIntrospectionCacheTTLSeconds int `json:"spider_snoop_introspection_cache_ttl_seconds,omitempty"`
+
+	// AdminUISessionMaxAgeSeconds bounds how long a browser admin UI
+	// session (issue #17: login via POST /admin/ui/session) stays valid
+	// before the human must sign in again, regardless of activity. Falls
+	// back to DefaultAdminUISessionMaxAgeSeconds when the admin API is
+	// enabled and this is unset. Independent of
+	// SpiderSnoopIntrospectionCacheTTLSeconds -- that bounds how stale a
+	// single introspection result can be; this bounds the UI session's
+	// own total lifetime.
+	AdminUISessionMaxAgeSeconds int `json:"admin_ui_session_max_age_seconds,omitempty"`
 }
 
 // AdminAPIEnabled reports whether internal/adminapi's routes should be
@@ -332,6 +348,9 @@ func Load(path string) (*Config, error) {
 		}
 		if c.SpiderSnoopIntrospectionCacheTTLSeconds <= 0 {
 			c.SpiderSnoopIntrospectionCacheTTLSeconds = DefaultSpiderSnoopIntrospectionCacheTTLSeconds
+		}
+		if c.AdminUISessionMaxAgeSeconds <= 0 {
+			c.AdminUISessionMaxAgeSeconds = DefaultAdminUISessionMaxAgeSeconds
 		}
 	}
 	for i, n := range c.Nodes {

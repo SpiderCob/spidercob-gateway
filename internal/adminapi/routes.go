@@ -13,6 +13,7 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
+	"github.com/sumeetgp/spidercob-gateway/internal/uisession"
 )
 
 // HumanSessionHeader carries the acting human's own spider-snoop session
@@ -47,14 +48,19 @@ type adminIdentity struct {
 	humanRole     string
 }
 
-// Config is AdminAPI's construction input. All four fields are required
-// -- New fails loudly rather than building a partially-wired API that
-// would panic on first use.
+// Config is AdminAPI's construction input. All five fields are
+// required -- New fails loudly rather than building a partially-wired
+// API that would panic on first use.
 type Config struct {
 	Store        store.Store
 	Identity     *identity.Service
 	Authn        AdminTokenValidator
 	Introspector SpiderSnoopIntrospector
+	// UISessions backs the browser-facing /admin/ui/session endpoints
+	// (issue #17) -- a strictly additive credential shape alongside
+	// Authn/Introspector's existing service-to-service dual-trust gate,
+	// not a replacement for it. See internal/uisession's package doc.
+	UISessions *uisession.Registry
 }
 
 // AdminAPI serves the gateway's HTTP admin surface (issue #13).
@@ -63,18 +69,20 @@ type AdminAPI struct {
 	identity     *identity.Service
 	authn        AdminTokenValidator
 	introspector SpiderSnoopIntrospector
+	uiSessions   *uisession.Registry
 }
 
 // New builds an AdminAPI from cfg.
 func New(cfg Config) (*AdminAPI, error) {
-	if cfg.Store == nil || cfg.Identity == nil || cfg.Authn == nil || cfg.Introspector == nil {
-		return nil, fmt.Errorf("adminapi: Store, Identity, Authn, and Introspector are all required")
+	if cfg.Store == nil || cfg.Identity == nil || cfg.Authn == nil || cfg.Introspector == nil || cfg.UISessions == nil {
+		return nil, fmt.Errorf("adminapi: Store, Identity, Authn, Introspector, and UISessions are all required")
 	}
 	return &AdminAPI{
 		store:        cfg.Store,
 		identity:     cfg.Identity,
 		authn:        cfg.Authn,
 		introspector: cfg.Introspector,
+		uiSessions:   cfg.UISessions,
 	}, nil
 }
 
@@ -86,22 +94,36 @@ func New(cfg Config) (*AdminAPI, error) {
 // never needed more than that.
 func (a *AdminAPI) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /admin/agents", a.gate(a.listAgents))
-	mux.HandleFunc("POST /admin/agents", a.gate(a.createAgent))
-	mux.HandleFunc("DELETE /admin/agents/{client_id}", a.gate(a.revokeAgent))
+	// Agents/groups/policies accept either credential shape (issue #17:
+	// gateBrowserOrService) -- the browser-facing admin UI talks to
+	// exactly these three resource families in its v0. Nodes stay
+	// service-to-service only (a.gate), unchanged from issue #15.
+	mux.HandleFunc("GET /admin/agents", a.gateBrowserOrService(a.listAgents))
+	mux.HandleFunc("POST /admin/agents", a.gateBrowserOrService(a.createAgent))
+	mux.HandleFunc("DELETE /admin/agents/{client_id}", a.gateBrowserOrService(a.revokeAgent))
 
-	mux.HandleFunc("GET /admin/groups", a.gate(a.listGroups))
-	mux.HandleFunc("POST /admin/groups", a.gate(a.createGroup))
-	mux.HandleFunc("DELETE /admin/groups/{name}", a.gate(a.deleteGroup))
-	mux.HandleFunc("POST /admin/groups/{name}/members", a.gate(a.addGroupMember))
-	mux.HandleFunc("DELETE /admin/groups/{name}/members/{type}/{identifier}", a.gate(a.removeGroupMember))
+	mux.HandleFunc("GET /admin/groups", a.gateBrowserOrService(a.listGroups))
+	mux.HandleFunc("POST /admin/groups", a.gateBrowserOrService(a.createGroup))
+	mux.HandleFunc("DELETE /admin/groups/{name}", a.gateBrowserOrService(a.deleteGroup))
+	mux.HandleFunc("POST /admin/groups/{name}/members", a.gateBrowserOrService(a.addGroupMember))
+	mux.HandleFunc("DELETE /admin/groups/{name}/members/{type}/{identifier}", a.gateBrowserOrService(a.removeGroupMember))
 
-	mux.HandleFunc("GET /admin/policies", a.gate(a.listPolicies))
-	mux.HandleFunc("PUT /admin/policies", a.gate(a.replacePolicies))
+	mux.HandleFunc("GET /admin/policies", a.gateBrowserOrService(a.listPolicies))
+	mux.HandleFunc("PUT /admin/policies", a.gateBrowserOrService(a.replacePolicies))
 
 	mux.HandleFunc("GET /admin/nodes", a.gate(a.listNodes))
 	mux.HandleFunc("POST /admin/nodes", a.gate(a.createNode))
 	mux.HandleFunc("DELETE /admin/nodes/{name}", a.gate(a.deleteNode))
+
+	// UI session lifecycle (issue #17) -- these three are the login/
+	// whoami/logout surface itself, so none of them sit behind either
+	// gate: createUISession *establishes* trust from a fresh spider-
+	// snoop session token, and get/deleteUISession check the cookie
+	// directly, the same live-introspection logic gateBrowserOrService
+	// reuses for every other browser-facing request.
+	mux.HandleFunc("POST /admin/ui/session", a.createUISession)
+	mux.HandleFunc("GET /admin/ui/session", a.getUISession)
+	mux.HandleFunc("DELETE /admin/ui/session", a.deleteUISession)
 	return mux
 }
 
@@ -142,6 +164,29 @@ func (a *AdminAPI) gate(next http.HandlerFunc) http.HandlerFunc {
 
 		ident := adminIdentity{nhiSubject: claims.Subject, humanUsername: result.Username, humanRole: result.Role}
 		next(w, r.WithContext(context.WithValue(r.Context(), adminIdentityCtxKey{}, ident)))
+	}
+}
+
+// gateBrowserOrService additionally accepts a valid UI session cookie
+// (issue #17) as an alternative to the NHI-token-plus-header pair --
+// strictly additive: the underlying dual-trust gate is completely
+// unmodified and remains the only option for /admin/nodes. A cookie is
+// tried first only if one is actually present; a missing, unknown, or
+// aged-out cookie falls through to the ordinary gate rather than
+// failing immediately -- a stale leftover cookie sitting alongside a
+// still-valid NHI token (a service-to-service caller happens to also
+// carry one) must not become a hard failure, and a request with no
+// cookie at all must see exactly the same errors/status codes gate
+// already produces, unchanged from issue #13/#15.
+func (a *AdminAPI) gateBrowserOrService(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie(UISessionCookieName); err == nil {
+			if ident, ok := a.checkUISessionCookie(r); ok {
+				next(w, r.WithContext(context.WithValue(r.Context(), adminIdentityCtxKey{}, ident)))
+				return
+			}
+		}
+		a.gate(next)(w, r)
 	}
 }
 

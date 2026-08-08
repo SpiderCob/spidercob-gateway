@@ -1,0 +1,29 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+# Build output goes to ../internal/webui/dist (vite.config.ts), not
+# here -- go:embed can't reach across a "../" pattern, so the Go
+# package that embeds it owns its build directory. This "dist" entry
+# is just a safety net in case someone runs a plain `vite build`
+# without the configured outDir.
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
