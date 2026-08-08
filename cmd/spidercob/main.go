@@ -157,6 +157,48 @@ func main() {
 		}
 	}
 
+	// SeedUsers (issue #21): the standalone-deployment (no spider-snoop)
+	// bootstrap for local Mode A humans, CSV-sourced via
+	// cfg.SeedUsersCSVPath. Mirrors the SeedAgents loop immediately
+	// above exactly -- create-if-missing, group assignment always runs
+	// (even for an already-seeded user, so adding a group to an
+	// existing CSV row and restarting still takes effect), and an
+	// existing user's password is never touched by a later run: a
+	// store.ErrConflict here means "already provisioned," not "update
+	// it," the same idempotency posture SeedAgents already has and
+	// deliberately not Policies'/mcp_nodes' "config wins, update in
+	// place" posture -- resetting a live human's password from a stale
+	// or edited CSV would be a real security foot-gun, not a
+	// convenience.
+	for _, seed := range cfg.SeedUsers {
+		user, err := identitySvc.CreateUser(context.Background(), seed.Username, seed.Password)
+		switch {
+		case err == nil:
+			slog.Info("seeded user", "username", seed.Username)
+		case errors.Is(err, store.ErrConflict):
+			slog.Info("user already seeded, leaving existing password untouched", "username", seed.Username)
+			user, err = db.GetUserByUsername(context.Background(), seed.Username)
+			if err != nil {
+				slog.Error("failed to look up already-seeded user", "username", seed.Username, "err", err)
+				os.Exit(1)
+			}
+		default:
+			slog.Error("failed to seed user", "username", seed.Username, "err", err)
+			os.Exit(1)
+		}
+		for _, groupName := range seed.Groups {
+			g, err := getOrCreateGroup(db, groupName)
+			if err != nil {
+				slog.Error("failed to resolve seed user group", "group", groupName, "err", err)
+				os.Exit(1)
+			}
+			if err := db.AssignUserGroup(context.Background(), user.ID, g.ID); err != nil {
+				slog.Error("failed to assign seed user to group", "username", seed.Username, "group", groupName, "err", err)
+				os.Exit(1)
+			}
+		}
+	}
+
 	// Policy config is the sole source of policy truth in this phase (no
 	// admin API exists yet, issue #7) -- fully replaces whatever's in the
 	// store on every startup, unlike identity data. See

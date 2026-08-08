@@ -118,6 +118,21 @@ instead of going through `make`.
   required behavior — that stays `run-e2e-nodes.sh`'s job, unmodified.
   Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-seed-users.sh`** — issue #21's CSV bulk user import
+  (Phase 4c-3), against the real compiled binary: a real CSV file
+  (not inline `config.json`) bootstraps a local Mode A human via
+  `seed_users_csv_path`, and that user's real password actually works
+  — a real `POST /token` login grant, then a real authorized
+  `tools/call` through a real stdio node, the same "first real 200"
+  DoD pattern `run-e2e-policy.sh` established, here for a CSV-seeded
+  human instead of a config-seeded NHI. Then, like `run-e2e-nodes.sh`,
+  actually kills and relaunches the compiled binary — this time
+  against an *edited* CSV whose password for that same username has
+  changed — and confirms the **original** password still works and
+  the edited one doesn't: this bootstrap must never silently reset an
+  existing user's password on a later run. Not part of
+  `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

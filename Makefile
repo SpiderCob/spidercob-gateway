@@ -1,4 +1,4 @@
-.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes ci ci-interop run docker
+.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes e2e-seed-users ci ci-interop run docker
 
 # web builds the admin UI's static assets into internal/webui/dist
 # (issue #17) -- required before `go build`/`go vet`/`go test ./...`
@@ -40,6 +40,9 @@ e2e-adminui-session:
 
 e2e-adminui-nodes:
 	./automation/run-e2e-adminui-nodes.sh
+
+e2e-seed-users:
+	./automation/run-e2e-seed-users.sh
 
 ci: web ## fast suite + real end-to-end validation -- run before opening a PR (builds the admin UI first, issue #17)
 	./automation/run-all.sh
