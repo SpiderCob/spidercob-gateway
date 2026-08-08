@@ -143,6 +143,23 @@ type Config struct {
 	// weaker than a generated one.
 	SeedAgents []SeedAgent `json:"seed_agents,omitempty"`
 
+	// SeedUsersCSVPath, if set, names a CSV file (username, password,
+	// optional semicolon-separated groups columns) to bulk-provision
+	// local (Mode A) human accounts from at startup (issue #21) -- the
+	// config-bootstrap mechanism for a standalone (no spider-snoop)
+	// deployment, which has no admin API/UI to provision users through
+	// any other way. Read relative to the working directory the
+	// gateway is started from, same convention StoreDBPath already
+	// uses. See ParseSeedUsersCSV for the file's exact format and
+	// validation rules.
+	SeedUsersCSVPath string `json:"seed_users_csv_path,omitempty"`
+	// SeedUsers is populated by Load from the file SeedUsersCSVPath
+	// names -- not itself part of config.json's JSON schema (unlike
+	// SeedAgents, which is authored inline), since this is meant for
+	// genuinely bulk, spreadsheet-sourced data a CSV fits and an inline
+	// JSON array doesn't.
+	SeedUsers []SeedUser `json:"-"`
+
 	// DevAllowAllPolicy, if true, makes the gateway use policy.AllowAll{}
 	// instead of the real policy.DenyAll{} default. This exists ONLY so
 	// automation/run-e2e.sh can exercise the full session/DLP pipeline
@@ -336,6 +353,21 @@ func Load(path string) (*Config, error) {
 	}
 	if c.PinCheckIntervalSeconds <= 0 {
 		c.PinCheckIntervalSeconds = DefaultPinCheckIntervalSeconds
+	}
+	if c.SeedUsersCSVPath != "" {
+		f, err := os.Open(c.SeedUsersCSVPath)
+		if err != nil {
+			return nil, fmt.Errorf("seed_users_csv_path: %w", err)
+		}
+		users, err := ParseSeedUsersCSV(f)
+		closeErr := f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("seed_users_csv_path: %w", err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("seed_users_csv_path: %w", closeErr)
+		}
+		c.SeedUsers = users
 	}
 	haveClientIDs := len(c.AdminIntegrationClientIDs) > 0
 	haveBaseURL := c.SpiderSnoopBaseURL != ""
