@@ -1,4 +1,4 @@
-.PHONY: build test e2e e2e-idjag e2e-pin ci ci-interop run docker
+.PHONY: build test e2e e2e-idjag e2e-pin e2e-schema ci ci-interop run docker
 
 build:
 	go build -o spidercob ./cmd/spidercob
@@ -14,6 +14,9 @@ e2e-idjag:
 
 e2e-pin:
 	./automation/run-e2e-pin.sh
+
+e2e-schema:
+	./automation/run-e2e-schema.sh
 
 ci: ## fast suite + real end-to-end validation -- run before opening a PR
 	./automation/run-all.sh

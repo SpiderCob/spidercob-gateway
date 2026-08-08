@@ -7,6 +7,13 @@
 # visible while unchanged, then catches a simulated definition change
 # within one background refresh cycle and confirms the drifted tool is
 # both rejected via tools/call and invisible via tools/list.
+#
+# risky_tool's tools/call invocations below all pass a real "text"
+# argument, not {} -- since issue #11, pinserver's tool has a real,
+# go-sdk-inferred inputSchema requiring one, and schema enforcement would
+# otherwise reject these calls for a reason unrelated to what this script
+# actually tests (see run-e2e-schema.sh for the schema-enforcement proof
+# itself).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -139,7 +146,7 @@ check_contains "risky_tool visible before any pin exists" "$pre_list_body" '"nam
 
 pre_call_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/pin_node/" \
 	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
-	-d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"risky_tool","arguments":{}}}')
+	-d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"risky_tool","arguments":{"text":"hello"}}}')
 check "risky_tool callable before any pin exists" "$pre_call_status" "200"
 
 echo "==> waiting for the background scheduler's first refresh (TOFU establishment)"
@@ -153,7 +160,7 @@ check_contains "risky_tool still visible right after TOFU establishment" "$post_
 
 post_tofu_call=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/pin_node/" \
 	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
-	-d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"risky_tool","arguments":{}}}')
+	-d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"risky_tool","arguments":{"text":"hello"}}}')
 check "risky_tool still callable right after TOFU establishment" "$post_tofu_call" "200"
 
 echo "==> simulating a rug pull: the tool's description changes underneath the existing pin"
@@ -165,10 +172,10 @@ sleep 3
 echo "==> THE DoD MOMENT: drift is caught within one refresh cycle, tool is blocked AND invisible"
 drift_call_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/pin_node/" \
 	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
-	-d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"risky_tool","arguments":{}}}')
+	-d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"risky_tool","arguments":{"text":"hello"}}}')
 drift_call_body=$(curl -sS -X POST "${base}/mcp/pin_node/" \
 	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
-	-d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"risky_tool","arguments":{}}}')
+	-d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"risky_tool","arguments":{"text":"hello"}}}')
 check "drifted tool's tools/call is rejected (403, distinct from a policy denial)" "$drift_call_status" "403"
 check_contains "rejection reason is distinguishable as pinning, not policy (story 24)" "$drift_call_body" "quarantined"
 

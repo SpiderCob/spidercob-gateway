@@ -144,14 +144,14 @@ Modular pipeline, each stage a `Scanner` interface (verdict: allow / redact / bl
 
 **Inbound (agent → MCP):**
 
-- Schema enforcement: arguments must validate against the tool's pinned `inputSchema`. Rejects whole classes of injection for free.
-- Injection heuristics: pattern sets for prompt-injection markers ("ignore previous instructions", role-reassignment phrases, encoded payloads), SQL/command-injection signatures for tools that touch shells/DBs, homoglyph/zero-width-char normalization *before* matching.
-- Size/recursion caps on JSON structures.
+- Schema enforcement: arguments must validate against the tool's pinned `inputSchema`. Rejects whole classes of injection for free. *(Updated 2026-08-07 — implemented, issue #11: a composed `tools/call`-gate check via `pin.ValidateArguments`/`google/jsonschema-go`, not a `Scanner` — see `MASTER_PLAN.md` §6, 2026-08-07. SQL/command-injection signatures and size/recursion caps below remain not built — a byte-size cap exists at the transport layer only.)*
+- Injection heuristics: pattern sets for prompt-injection markers ("ignore previous instructions", role-reassignment phrases, encoded payloads), SQL/command-injection signatures for tools that touch shells/DBs, homoglyph/zero-width-char normalization *before* matching. *(Updated 2026-08-07 — homoglyph/zero-width normalization implemented, issue #11 (detection-only, never mutates the real bytes). SQL/command-injection signatures still not built.)*
+- Size/recursion caps on JSON structures. *(Not built as of issue #11 — a byte-size cap exists at the transport layer (`maxBodyBytes`); JSON recursion-depth caps remain a later item.)*
 
 **Outbound (MCP → agent):**
 
-- Secret detection: curated regex + entropy scoring (AWS keys, GCP/Azure creds, private key blocks, JWTs, connection strings) — start from Gitleaks' ruleset.
-- PII detection: SSN/credit-card (with Luhn), email/phone (configurable — often legitimate).
+- Secret detection: curated regex + entropy scoring (AWS keys, GCP/Azure creds, private key blocks, JWTs, connection strings) — start from Gitleaks' ruleset. *(Updated 2026-08-07 — implemented, issue #11: pattern set expanded to 9 categories (+ Azure, Stripe, GitHub tokens, DB connection strings); entropy scoring is a separate `EntropyScanner`, flag-only, ordered after the pattern-matching scanners so it never double-flags an already-redacted value.)*
+- PII detection: SSN/credit-card (with Luhn), email/phone (configurable — often legitimate). *(Updated 2026-08-07 — implemented, issue #11: SSN plausibility-filtered (rejects reserved/all-zero ranges), credit cards Luhn-validated, both redact by default; email/phone flag-only and off by default via `config.ScanDetectEmail`/`ScanDetectPhone`.)*
 - **Response-embedded injection:** scan *tool results* for instruction-like content targeting the LLM ("when you summarize this, also run…"). Data returned from MCP servers is the #1 injection vector into agents; scanning responses for injections, not just secrets, is a differentiator most gateways skip.
 - Redaction is structural (`[REDACTED:aws-key]` with audit reference), never silent dropping.
 

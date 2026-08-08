@@ -113,14 +113,20 @@ type NewPolicy struct {
 
 // ToolPin is one tool's trust-on-first-observation baseline (issue #9):
 // Hash covers name+description+inputSchema together, computed by
-// internal/pin. QuarantinedAt is nil until a refresh observes a hash that
-// no longer matches -- there is no re-approval mechanism in this phase,
-// so once set it stays set until a human edits the store directly.
+// internal/pin. InputSchema is the raw pinned inputSchema itself (issue
+// #11) -- Hash alone can't be used for schema enforcement, since a hash
+// can't be un-hashed back into the schema it was computed over; nil
+// means no inputSchema was ever pinned (a tool that legitimately takes
+// no structured arguments), not that one was pinned and is empty.
+// QuarantinedAt is nil until a refresh observes a hash that no longer
+// matches -- there is no re-approval mechanism in this phase, so once
+// set it stays set until a human edits the store directly.
 type ToolPin struct {
 	ID            int64
 	Node          string
 	ToolName      string
 	Hash          string
+	InputSchema   *string
 	PinnedAt      time.Time
 	QuarantinedAt *time.Time
 	DriftDetail   *string
@@ -193,10 +199,13 @@ type Store interface {
 	// error.
 	GetToolPin(ctx context.Context, node, toolName string) (ToolPin, error)
 	// CreateToolPin establishes a new pin (TOFU) with no quarantine.
-	// Returns ErrConflict if a pin for this (node, tool_name) already
-	// exists -- the caller should treat that as a logic error (TOFU only
-	// ever applies once per tool), not something to silently overwrite.
-	CreateToolPin(ctx context.Context, node, toolName, hash string) (ToolPin, error)
+	// inputSchema is the tool's raw pinned inputSchema (issue #11's
+	// schema-enforcement seam reads it back later); pass "" for a tool
+	// with no inputSchema. Returns ErrConflict if a pin for this
+	// (node, tool_name) already exists -- the caller should treat that as
+	// a logic error (TOFU only ever applies once per tool), not something
+	// to silently overwrite.
+	CreateToolPin(ctx context.Context, node, toolName, hash, inputSchema string) (ToolPin, error)
 	// QuarantineToolPin marks an existing pin as drifted, persisting
 	// driftDetail for later investigation (story 12). Idempotent: calling
 	// it again just updates the detail/timestamp, it doesn't error on an

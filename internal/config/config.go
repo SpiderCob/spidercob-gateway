@@ -128,6 +128,15 @@ type Config struct {
 	// to DefaultPinCheckIntervalSeconds when unset; unrelated to, and
 	// normally much shorter than, PinRefreshIntervalSeconds itself.
 	PinCheckIntervalSeconds int `json:"pin_check_interval_seconds,omitempty"`
+
+	// ScanDetectEmail and ScanDetectPhone gate the two lower-confidence
+	// PII categories (issue #11 story 10-11: design doc §7's "email/phone
+	// (configurable — often legitimate)") -- both default false. SSN and
+	// Luhn-valid credit-card detection are unconditional and not gated by
+	// either flag, the same "confirmed shape redacts by default" posture
+	// SecretScanner already takes.
+	ScanDetectEmail bool `json:"scan_detect_email,omitempty"`
+	ScanDetectPhone bool `json:"scan_detect_phone,omitempty"`
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See

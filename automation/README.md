@@ -53,6 +53,18 @@ instead of something re-typed by hand each time.
   `tools/list`. Not part of `make ci-interop` — no Docker needed, runs in
   `make ci`.
 
+- **`run-e2e-schema.sh`** — issue #11's schema-enforcement seam, against
+  the real compiled binary and the same `pinserver` fixture
+  `run-e2e-pin.sh` uses: its one tool's `inputSchema` is the MCP go-sdk's
+  own real, inferred schema (a required `text` string, no additional
+  properties allowed) — not hand-crafted for this test. After a real
+  TOFU-established pin captures that schema, a valid call succeeds; a
+  call missing the required argument, one with a wrong-typed argument,
+  and one with an unexpected extra property are each rejected (403,
+  reason names "pinned schema" so it's distinguishable from a
+  policy/quarantine denial), all before ever reaching the upstream. Not
+  part of `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

@@ -104,6 +104,34 @@ func TestLoad_PinRefreshIntervalOverridesApplied(t *testing.T) {
 	}
 }
 
+func TestLoad_ScanDetectEmailPhoneDefaultOff(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ScanDetectEmail {
+		t.Fatal("ScanDetectEmail = true, want false (off by default)")
+	}
+	if cfg.ScanDetectPhone {
+		t.Fatal("ScanDetectPhone = true, want false (off by default)")
+	}
+}
+
+func TestLoad_ScanDetectEmailPhoneOptIn(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"scan_detect_email":true,"scan_detect_phone":true}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ScanDetectEmail {
+		t.Fatal("ScanDetectEmail = false, want true")
+	}
+	if !cfg.ScanDetectPhone {
+		t.Fatal("ScanDetectPhone = false, want true")
+	}
+}
+
 func TestLoad_SeedAgentRequiresAllFields(t *testing.T) {
 	path := writeConfig(t, `{"nodes":[],"seed_agents":[{"client_id":"a"}]}`)
 	if _, err := Load(path); err == nil {

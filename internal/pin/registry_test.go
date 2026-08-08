@@ -189,3 +189,63 @@ func TestRegistry_IsQuarantined(t *testing.T) {
 		t.Fatalf("IsQuarantined = false for a drifted tool, want true")
 	}
 }
+
+func TestRegistry_PinnedSchema(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	ctx := context.Background()
+
+	schema, exists, err := reg.PinnedSchema(ctx, "jira", "never_seen")
+	if err != nil {
+		t.Fatalf("PinnedSchema (never observed): %v", err)
+	}
+	if exists {
+		t.Fatalf("PinnedSchema exists = true for a tool with no pin, want false")
+	}
+	if schema != nil {
+		t.Fatalf("PinnedSchema schema = %v, want nil for a tool with no pin", schema)
+	}
+
+	def := ToolDef{
+		Name:        "search_docs",
+		Description: "search",
+		InputSchema: []byte(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+	}
+	if err := reg.Observe(ctx, "jira", []ToolDef{def}); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	schema, exists, err = reg.PinnedSchema(ctx, "jira", "search_docs")
+	if err != nil {
+		t.Fatalf("PinnedSchema: %v", err)
+	}
+	if !exists {
+		t.Fatalf("PinnedSchema exists = false for a pinned tool, want true")
+	}
+	if string(schema) != string(def.InputSchema) {
+		t.Fatalf("PinnedSchema = %s, want %s", schema, def.InputSchema)
+	}
+}
+
+func TestRegistry_PinnedSchema_NoInputSchemaPinned(t *testing.T) {
+	// A tool that legitimately takes no structured arguments (no
+	// InputSchema at observation time) must resolve as "a pin exists,
+	// but there's no schema" -- not confused with "no pin exists at all."
+	reg, _ := newTestRegistry(t)
+	ctx := context.Background()
+
+	def := ToolDef{Name: "no_args_tool", Description: "takes no arguments"}
+	if err := reg.Observe(ctx, "jira", []ToolDef{def}); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	schema, exists, err := reg.PinnedSchema(ctx, "jira", "no_args_tool")
+	if err != nil {
+		t.Fatalf("PinnedSchema: %v", err)
+	}
+	if !exists {
+		t.Fatalf("PinnedSchema exists = false for a pinned tool, want true")
+	}
+	if schema != nil {
+		t.Fatalf("PinnedSchema schema = %s, want nil (no inputSchema was ever pinned)", schema)
+	}
+}

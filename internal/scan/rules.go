@@ -15,6 +15,20 @@ var secretPatterns = map[string]*regexp.Regexp{
 	"private-key-block": regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
 	"jwt":               regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
 	"slack-token":       regexp.MustCompile(`\bxox[baprs]-[0-9A-Za-z-]{10,}\b`),
+
+	// Phase 3c (issue #11 story 5) -- expanded beyond the original five,
+	// still deliberately Gitleaks-derived rather than invented from
+	// scratch (design doc §7).
+	"azure-storage-key": regexp.MustCompile(`\bAccountKey=[A-Za-z0-9+/]{86}==`),
+	// sk_/rk_ live or test secret keys only -- pk_ (publishable) keys are
+	// meant to be public and must not be flagged.
+	"stripe-key": regexp.MustCompile(`\b(sk|rk)_(live|test)_[A-Za-z0-9]{16,}\b`),
+	// Classic PATs (ghp_) are a fixed 36-char suffix; fine-grained PATs
+	// (github_pat_) are longer and underscore-delimited.
+	"github-token": regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b`),
+	// Only a connection string with embedded user:password credentials is
+	// a secret -- a bare host/port/db URI with no credentials is not.
+	"db-connection-string": regexp.MustCompile(`\b(postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s/]+:[^@\s]+@[^\s]+`),
 }
 
 type SecretScanner struct{}
@@ -53,9 +67,14 @@ func NewInjectionScanner() *InjectionScanner { return &InjectionScanner{} }
 
 func (s *InjectionScanner) Name() string { return "injection-heuristics" }
 
+// ScanRequest matches against a normalized copy of body (issue #11
+// stories 12-14: homoglyph/zero-width evasion resistance) — the returned
+// Verdict is the only thing derived from it; the caller's own copy of
+// body is untouched.
 func (s *InjectionScanner) ScanRequest(body []byte) Verdict {
+	normalized := normalizeForDetection(body)
 	for _, re := range injectionPatterns {
-		if re.Match(body) {
+		if re.Match(normalized) {
 			return Verdict{Action: Flag, Scanner: s.Name(), Detail: re.String()}
 		}
 	}
@@ -64,9 +83,13 @@ func (s *InjectionScanner) ScanRequest(body []byte) Verdict {
 
 // ScanResponse also checks tool RESULTS for instruction-like content aimed at
 // the LLM — response-embedded injection is the #1 vector into agents.
+// Matches against a normalized copy (same evasion resistance as
+// ScanRequest); the body returned to the caller is always the original,
+// unmodified bytes — normalization is detection-only.
 func (s *InjectionScanner) ScanResponse(body []byte) ([]byte, Verdict) {
+	normalized := normalizeForDetection(body)
 	for _, re := range injectionPatterns {
-		if re.Match(body) {
+		if re.Match(normalized) {
 			return body, Verdict{Action: Flag, Scanner: s.Name(), Detail: "response-embedded: " + re.String()}
 		}
 	}
