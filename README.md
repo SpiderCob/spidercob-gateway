@@ -2,7 +2,7 @@
 
 **The open-source MCP gateway for teams without an IAM department** — enterprise-grade agent identity (ID-JAG / MCP Enterprise-Managed Authorization) and traffic inspection, in one container.
 
-> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, phase 3b** — real identity/token issuance across all three modes (local, NHI, external IdP), a real group/method/tool policy engine (authorized calls actually succeed, unauthorized ones are rejected and hidden from `tools/list`), and now tool pinning: every node's tools are trusted on first observation and re-checked in the background, so a tool mutated after approval (a "rug pull") gets quarantined — blocked and hidden — automatically. No admin UI yet — policy and pin refresh cadence are config-file-only. Not production-ready.
+> Part of the [Spidercob](https://github.com/sumeetgp/spider-snoop) family. Status: **pre-alpha, Phase 3 complete** — real identity/token issuance across all three modes (local, NHI, external IdP), a real group/method/tool policy engine (authorized calls actually succeed, unauthorized ones are rejected and hidden from `tools/list`), tool pinning (every node's tools are trusted on first observation and re-checked in the background, so a tool mutated after approval — a "rug pull" — gets quarantined, blocked and hidden, automatically), and now schema-enforced tool calls plus a rounder DLP pipeline: call arguments are validated against each tool's pinned schema, secret/PII detection covers more real-world patterns (Luhn-checked cards, plausibility-filtered SSNs, an entropy scorer for unknown-shaped secrets), and injection-heuristic matching resists homoglyph/zero-width evasion. No admin UI yet — policy, pin refresh cadence, and PII detection toggles are all config-file-only. Not production-ready.
 
 ## Why
 
@@ -10,7 +10,7 @@ Non-human identities (agents, service accounts) outnumber humans ~100:1 in most 
 
 - **Spec-correct:** implements the resource side of [ID-JAG](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-identity-assertion-authz-grant) / MCP Enterprise-Managed Authorization — works with Okta, Entra, Keycloak. No IdP? The embedded identity mode has you covered.
 - **Small-team-shaped:** `docker compose up`, upload a CSV of users, check boxes. Target: protected MCPs in 15 minutes.
-- **Security data path:** outbound secret redaction, response-embedded injection detection, tool pinning (TOFU + background drift detection), hash-chained audit (planned).
+- **Security data path:** outbound secret/PII redaction (Luhn-checked cards, plausibility-filtered SSNs, entropy-based unknown-secret detection), response-embedded injection detection (homoglyph/zero-width evasion resistant), inbound schema enforcement against each tool's pinned `inputSchema`, tool pinning (TOFU + background drift detection), hash-chained audit (planned).
 
 ## Quickstart (current skeleton)
 
@@ -65,7 +65,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 2b: external IdP interop — ID-JAG grant (RFC 7523/8693), verified against a real Keycloak realm; Okta via a manual runbook
 - [x] Phase 3a: group/method/tool policy engine, `tools/list` filtering, rate limiting
 - [x] Phase 3b: tool pinning (TOFU + background drift detection, rug-pull defense)
-- [ ] Phase 3c: scan upgrades (schema enforcement, entropy, PII, homoglyph)
+- [x] Phase 3c: scan upgrades (schema enforcement, entropy, PII, homoglyph) — **Phase 3 complete**
 - [ ] Phase 4: admin UI, CSV users, docker packaging → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 

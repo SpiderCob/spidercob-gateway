@@ -2,6 +2,7 @@ package pin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,7 +43,7 @@ func (r *Registry) Observe(ctx context.Context, node string, tools []ToolDef) er
 		existing, err := r.store.GetToolPin(ctx, node, t.Name)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			if _, err := r.store.CreateToolPin(ctx, node, t.Name, newHash); err != nil {
+			if _, err := r.store.CreateToolPin(ctx, node, t.Name, newHash, string(t.InputSchema)); err != nil {
 				return fmt.Errorf("pin: establish %s/%s: %w", node, t.Name, err)
 			}
 		case err != nil:
@@ -104,4 +105,27 @@ func (r *Registry) IsQuarantined(ctx context.Context, node, toolName string) boo
 		return true
 	}
 	return p.QuarantinedAt != nil
+}
+
+// PinnedSchema returns node's tool toolName's currently-pinned
+// inputSchema, if any -- the schema-enforcement seam's read side (issue
+// #11). exists is false when no pin has been established yet for this
+// (node, toolName), distinguishable from "a pin exists but the tool has
+// no inputSchema" (schema == nil, exists == true): both call for the
+// same treatment at the call site -- nothing to validate against, so
+// skip validation and allow through (stories 2 and 23) -- but for
+// different reasons worth keeping distinguishable in the return shape
+// even though today's caller treats them identically.
+func (r *Registry) PinnedSchema(ctx context.Context, node, toolName string) (schema json.RawMessage, exists bool, err error) {
+	p, err := r.store.GetToolPin(ctx, node, toolName)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if p.InputSchema == nil {
+		return nil, true, nil
+	}
+	return json.RawMessage(*p.InputSchema), true, nil
 }

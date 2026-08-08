@@ -218,7 +218,7 @@ func TestToolPin_CreateGetQuarantine(t *testing.T) {
 		t.Fatalf("GetToolPin (unpinned) = %v, want ErrNotFound", err)
 	}
 
-	pin, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v1")
+	pin, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v1", "")
 	if err != nil {
 		t.Fatalf("CreateToolPin: %v", err)
 	}
@@ -227,6 +227,9 @@ func TestToolPin_CreateGetQuarantine(t *testing.T) {
 	}
 	if pin.QuarantinedAt != nil {
 		t.Fatalf("expected a freshly-established pin to not be quarantined, got %+v", pin.QuarantinedAt)
+	}
+	if pin.InputSchema != nil {
+		t.Fatalf("expected InputSchema to be nil for an empty-string input, got %v", *pin.InputSchema)
 	}
 	if pin.PinnedAt.IsZero() {
 		t.Fatalf("expected PinnedAt to be set")
@@ -240,7 +243,7 @@ func TestToolPin_CreateGetQuarantine(t *testing.T) {
 		t.Fatalf("GetToolPin = %+v, want %+v", got, pin)
 	}
 
-	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v2"); !errors.Is(err, ErrConflict) {
+	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "hash-v2", ""); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate CreateToolPin = %v, want ErrConflict", err)
 	}
 
@@ -269,17 +272,39 @@ func TestToolPin_CreateGetQuarantine(t *testing.T) {
 	}
 }
 
+func TestToolPin_InputSchemaPersists(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	schema := `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`
+	pin, err := s.CreateToolPin(ctx, "jira", "get_ticket", "hash-v1", schema)
+	if err != nil {
+		t.Fatalf("CreateToolPin: %v", err)
+	}
+	if pin.InputSchema == nil || *pin.InputSchema != schema {
+		t.Fatalf("pin.InputSchema = %v, want %q", pin.InputSchema, schema)
+	}
+
+	got, err := s.GetToolPin(ctx, "jira", "get_ticket")
+	if err != nil {
+		t.Fatalf("GetToolPin: %v", err)
+	}
+	if got.InputSchema == nil || *got.InputSchema != schema {
+		t.Fatalf("GetToolPin's InputSchema = %v, want %q", got.InputSchema, schema)
+	}
+}
+
 func TestToolPinsForNode(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "h1"); err != nil {
+	if _, err := s.CreateToolPin(ctx, "jira", "search_issues", "h1", ""); err != nil {
 		t.Fatalf("CreateToolPin: %v", err)
 	}
-	if _, err := s.CreateToolPin(ctx, "jira", "create_issue", "h2"); err != nil {
+	if _, err := s.CreateToolPin(ctx, "jira", "create_issue", "h2", ""); err != nil {
 		t.Fatalf("CreateToolPin: %v", err)
 	}
-	if _, err := s.CreateToolPin(ctx, "postgres-ro", "query", "h3"); err != nil {
+	if _, err := s.CreateToolPin(ctx, "postgres-ro", "query", "h3", ""); err != nil {
 		t.Fatalf("CreateToolPin: %v", err)
 	}
 

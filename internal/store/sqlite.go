@@ -394,18 +394,22 @@ func nonNilStrings(s []string) []string {
 func (s *SQLiteStore) GetToolPin(ctx context.Context, node, toolName string) (ToolPin, error) {
 	var p ToolPin
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, node, tool_name, hash, pinned_at, quarantined_at, drift_detail
+		`SELECT id, node, tool_name, hash, input_schema, pinned_at, quarantined_at, drift_detail
 		 FROM tool_pins WHERE node = ? AND tool_name = ?`, node, toolName,
-	).Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail)
+	).Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.InputSchema, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ToolPin{}, ErrNotFound
 	}
 	return p, err
 }
 
-func (s *SQLiteStore) CreateToolPin(ctx context.Context, node, toolName, hash string) (ToolPin, error) {
+func (s *SQLiteStore) CreateToolPin(ctx context.Context, node, toolName, hash, inputSchema string) (ToolPin, error) {
+	var schema any // NULL when empty, not an empty-string row -- distinguishes "no inputSchema was ever pinned" from "one was pinned and happened to be empty"
+	if inputSchema != "" {
+		schema = inputSchema
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tool_pins (node, tool_name, hash) VALUES (?, ?, ?)`, node, toolName, hash)
+		`INSERT INTO tool_pins (node, tool_name, hash, input_schema) VALUES (?, ?, ?, ?)`, node, toolName, hash, schema)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return ToolPin{}, ErrConflict
@@ -434,7 +438,7 @@ func (s *SQLiteStore) QuarantineToolPin(ctx context.Context, node, toolName, dri
 
 func (s *SQLiteStore) ToolPinsForNode(ctx context.Context, node string) ([]ToolPin, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, node, tool_name, hash, pinned_at, quarantined_at, drift_detail
+		`SELECT id, node, tool_name, hash, input_schema, pinned_at, quarantined_at, drift_detail
 		 FROM tool_pins WHERE node = ?`, node)
 	if err != nil {
 		return nil, err
@@ -444,7 +448,7 @@ func (s *SQLiteStore) ToolPinsForNode(ctx context.Context, node string) ([]ToolP
 	var out []ToolPin
 	for rows.Next() {
 		var p ToolPin
-		if err := rows.Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail); err != nil {
+		if err := rows.Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.InputSchema, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

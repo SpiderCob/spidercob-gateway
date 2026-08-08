@@ -118,7 +118,7 @@ func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
 		nodes:      make(map[string]*nodeConfig),
 		sessions:   newSessionManager(time.Duration(cfg.IdleSessionTimeoutSeconds) * time.Second),
 		policy:     initialPolicy,
-		scanners:   scan.Default(),
+		scanners:   scan.DefaultWithPII(scan.PIIConfig{DetectEmail: cfg.ScanDetectEmail, DetectPhone: cfg.ScanDetectPhone}),
 		client:     &http.Client{Timeout: 30 * time.Second},
 		authn:      authn,
 		issuer:     strings.TrimRight(cfg.Issuer, "/"),
@@ -293,6 +293,27 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rpcMethod == "tools/call" && g.pins != nil && g.pins.IsQuarantined(r.Context(), nodeName, toolName) {
 		http.Error(sr, "tool quarantined: its definition changed since it was first observed", http.StatusForbidden)
 		return
+	}
+
+	// Schema enforcement (issue #11): a third, independent gate -- policy
+	// answers "is this principal allowed," pinning's quarantine check
+	// answers "is this still the tool everyone agreed to," and this
+	// answers "does this specific call's arguments match what was agreed
+	// to." No pin yet, or a pin with no inputSchema, both mean "nothing to
+	// validate against" -- skip, don't block (stories 2 and 23).
+	if rpcMethod == "tools/call" && g.pins != nil {
+		schema, exists, err := g.pins.PinnedSchema(r.Context(), nodeName, toolName)
+		if err != nil {
+			slog.Error("pin: failed to fetch pinned schema", "node", nodeName, "tool", toolName, "err", err)
+			http.Error(sr, "internal error checking tool schema", http.StatusInternalServerError)
+			return
+		}
+		if exists && schema != nil {
+			if err := pin.ValidateArguments(schema, jsonRPCToolArguments(body)); err != nil {
+				writeJSONRPCError(sr, body, "tool call arguments do not match the pinned schema: "+err.Error())
+				return
+			}
+		}
 	}
 
 	if body != nil {
@@ -649,6 +670,23 @@ func jsonRPCToolName(body []byte) string {
 		return ""
 	}
 	return m.Params.Name
+}
+
+// jsonRPCToolArguments extracts params.arguments from a tools/call
+// request body -- the raw JSON schema enforcement (issue #11) validates
+// against a tool's pinned inputSchema. Returns nil (not an error) on a
+// malformed body; the caller treats that the same as "no arguments,"
+// consistent with jsonRPCToolName's own best-effort-extraction posture.
+func jsonRPCToolArguments(body []byte) json.RawMessage {
+	var m struct {
+		Params struct {
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil
+	}
+	return m.Params.Arguments
 }
 
 // filterToolsListResponse rewrites a tools/list JSON-RPC response's tools
