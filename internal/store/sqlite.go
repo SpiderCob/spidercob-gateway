@@ -183,8 +183,8 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, clientID, secretHash, nam
 func (s *SQLiteStore) GetAgentByClientID(ctx context.Context, clientID string) (Agent, error) {
 	var a Agent
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, secret_hash, name, created_at FROM agents WHERE client_id = ?`, clientID,
-	).Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt)
+		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM agents WHERE client_id = ?`, clientID,
+	).Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt, &a.RevokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Agent{}, ErrNotFound
 	}
@@ -194,12 +194,54 @@ func (s *SQLiteStore) GetAgentByClientID(ctx context.Context, clientID string) (
 func (s *SQLiteStore) GetAgentByID(ctx context.Context, id int64) (Agent, error) {
 	var a Agent
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, secret_hash, name, created_at FROM agents WHERE id = ?`, id,
-	).Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt)
+		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM agents WHERE id = ?`, id,
+	).Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt, &a.RevokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Agent{}, ErrNotFound
 	}
 	return a, err
+}
+
+func (s *SQLiteStore) ListAgents(ctx context.Context) ([]Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM agents ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Agent
+	for rows.Next() {
+		var a Agent
+		if err := rows.Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt, &a.RevokedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) RevokeAgent(ctx context.Context, clientID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET revoked_at = CURRENT_TIMESTAMP WHERE client_id = ? AND revoked_at IS NULL`, clientID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	// Zero rows affected means either the agent doesn't exist, or it's
+	// already revoked (the WHERE clause excludes it either way) --
+	// idempotent revocation means "already revoked" isn't an error, so
+	// look the agent up to tell the two cases apart.
+	if _, err := s.GetAgentByClientID(ctx, clientID); err != nil {
+		return err // ErrNotFound, or a real lookup error
+	}
+	return nil
 }
 
 func (s *SQLiteStore) CreateGroup(ctx context.Context, name string) (Group, error) {
@@ -228,6 +270,33 @@ func (s *SQLiteStore) GetGroupByName(ctx context.Context, name string) (Group, e
 	return g, err
 }
 
+func (s *SQLiteStore) ListGroups(ctx context.Context) ([]Group, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name FROM groups ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanGroups(rows)
+}
+
+func (s *SQLiteStore) DeleteGroup(ctx context.Context, name string) error {
+	g, err := s.GetGroupByName(ctx, name)
+	if err != nil {
+		return err // ErrNotFound, or a real lookup error
+	}
+	var refCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM policies WHERE group_id = ?`, g.ID,
+	).Scan(&refCount); err != nil {
+		return err
+	}
+	if refCount > 0 {
+		return ErrConflict
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM groups WHERE id = ?`, g.ID)
+	return err
+}
+
 func (s *SQLiteStore) AssignUserGroup(ctx context.Context, userID, groupID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)`, userID, groupID)
@@ -237,6 +306,18 @@ func (s *SQLiteStore) AssignUserGroup(ctx context.Context, userID, groupID int64
 func (s *SQLiteStore) AssignAgentGroup(ctx context.Context, agentID, groupID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO agent_groups (agent_id, group_id) VALUES (?, ?)`, agentID, groupID)
+	return err
+}
+
+func (s *SQLiteStore) RemoveUserGroup(ctx context.Context, userID, groupID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM user_groups WHERE user_id = ? AND group_id = ?`, userID, groupID)
+	return err
+}
+
+func (s *SQLiteStore) RemoveAgentGroup(ctx context.Context, agentID, groupID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM agent_groups WHERE agent_id = ? AND group_id = ?`, agentID, groupID)
 	return err
 }
 
@@ -343,6 +424,8 @@ func (s *SQLiteStore) ReplacePolicies(ctx context.Context, policies []NewPolicy)
 	return tx.Commit()
 }
 
+const policyColumns = `id, group_id, node, rule_type, methods, tools, rate_limit_max_calls, rate_limit_window_seconds, block_on_scan_flag, created_at`
+
 func (s *SQLiteStore) PoliciesForGroups(ctx context.Context, groupIDs []int64, node string) ([]Policy, error) {
 	if len(groupIDs) == 0 {
 		return nil, nil
@@ -356,14 +439,30 @@ func (s *SQLiteStore) PoliciesForGroups(ctx context.Context, groupIDs []int64, n
 	args = append(args, node)
 
 	query := fmt.Sprintf(
-		`SELECT id, group_id, node, rule_type, methods, tools, rate_limit_max_calls, rate_limit_window_seconds, block_on_scan_flag, created_at
+		`SELECT `+policyColumns+`
 		 FROM policies WHERE group_id IN (%s) AND node = ?`, strings.Join(placeholders, ","))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanPolicies(rows)
+}
 
+// AllPolicies returns every policy row, unfiltered -- the admin API's
+// GET /admin/policies (issue #13) needs to show the complete current
+// rule set, not one scoped to a specific principal's groups the way
+// PoliciesForGroups (the evaluator's hot-path query) is.
+func (s *SQLiteStore) AllPolicies(ctx context.Context) ([]Policy, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+policyColumns+` FROM policies ORDER BY node, group_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPolicies(rows)
+}
+
+func scanPolicies(rows *sql.Rows) ([]Policy, error) {
 	var out []Policy
 	for rows.Next() {
 		var p Policy

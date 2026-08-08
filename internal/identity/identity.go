@@ -139,11 +139,14 @@ func (svc *Service) CreateAgentWithCredentials(ctx context.Context, clientID, se
 }
 
 // AuthenticateAgent verifies an NHI's client_credentials. Returns
-// ErrInvalidCredentials for both an unknown client_id and a wrong secret --
-// the same non-enumeration property as Authenticate, and the same
-// constant-time comparison inside verifySecret (MASTER_PLAN.md's five
-// security-review seams explicitly call out timing-safe secret comparison
-// as distinct from the human login path).
+// ErrInvalidCredentials for an unknown client_id, a wrong secret, AND a
+// revoked agent (issue #13) alike -- the same non-enumeration property as
+// Authenticate, and the same constant-time comparison inside
+// verifySecret (MASTER_PLAN.md's five security-review seams explicitly
+// call out timing-safe secret comparison as distinct from the human
+// login path). A revoked agent must never be distinguishable from a
+// wrong secret to the caller -- otherwise "invalid_client" vs. "this
+// agent exists but is revoked" itself leaks agent existence.
 func (svc *Service) AuthenticateAgent(ctx context.Context, clientID, secret string) (store.Agent, error) {
 	a, err := svc.store.GetAgentByClientID(ctx, clientID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -157,6 +160,9 @@ func (svc *Service) AuthenticateAgent(ctx context.Context, clientID, secret stri
 		return store.Agent{}, err
 	}
 	if !ok {
+		return store.Agent{}, ErrInvalidCredentials
+	}
+	if a.RevokedAt != nil {
 		return store.Agent{}, ErrInvalidCredentials
 	}
 	return a, nil

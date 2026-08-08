@@ -17,3 +17,5 @@ echo
 "$script_dir/run-e2e-pin.sh"
 echo
 "$script_dir/run-e2e-schema.sh"
+echo
+"$script_dir/run-e2e-adminapi.sh"

@@ -40,6 +40,17 @@ const (
 	grantSession           = "urn:spidercob:params:oauth:grant-type:session"
 )
 
+// AdminResource is the reserved "resource" value (RFC 8707) for minting
+// an admin-audience access token (issue #13) -- deliberately shaped so it
+// can never collide with a real, customer-chosen node name (nodes are
+// bare names like "jira"; this is underscore-prefixed and resolved
+// through its own path, never through resolveNode's node registry).
+// Unlike an ordinary node resource -- open to any authenticated agent,
+// since policy enforcement happens downstream at request time, not at
+// mint time -- minting a token for this one is restricted to a config-
+// designated allowlist of agent client_ids, checked at mint time.
+const AdminResource = "_admin"
+
 // idJAGGrantProfile is what this gateway advertises in RFC 9728's
 // authorization_grant_profiles_supported once at least one external IdP
 // is trusted (issue #5) -- the MCP EMA extension's client-discovery
@@ -87,6 +98,12 @@ type Config struct {
 	NHITokenTTL     time.Duration // zero -> DefaultNHITokenTTL
 	HumanTokenTTL   time.Duration // zero -> DefaultHumanTokenTTL
 	LocalSessionTTL time.Duration // zero -> DefaultLocalSessionTTL
+
+	// AdminIntegrationClientIDs is the allowlist of agent client_ids
+	// permitted to mint a token for AdminResource (issue #13). Empty
+	// (the default) means no agent can mint one -- the admin API is
+	// unreachable, not open by omission.
+	AdminIntegrationClientIDs []string
 }
 
 // AuthServer issues, publishes verification keys for, and validates this
@@ -102,6 +119,8 @@ type AuthServer struct {
 	nhiTTL     time.Duration
 	humanTTL   time.Duration
 	sessionTTL time.Duration
+
+	adminIntegrationClientIDs map[string]struct{}
 }
 
 // New builds an AuthServer, generating its first signing key and
@@ -129,17 +148,22 @@ func New(ctx context.Context, cfg Config) (*AuthServer, error) {
 	for _, n := range cfg.Nodes {
 		nodes[n] = struct{}{}
 	}
+	adminClientIDs := make(map[string]struct{}, len(cfg.AdminIntegrationClientIDs))
+	for _, id := range cfg.AdminIntegrationClientIDs {
+		adminClientIDs[id] = struct{}{}
+	}
 
 	as := &AuthServer{
-		issuer:     strings.TrimRight(cfg.Issuer, "/"),
-		identity:   cfg.Identity,
-		idpTrust:   cfg.IdPTrust,
-		keys:       keys,
-		nodes:      nodes,
-		denylist:   dl,
-		nhiTTL:     cfg.NHITokenTTL,
-		humanTTL:   cfg.HumanTokenTTL,
-		sessionTTL: cfg.LocalSessionTTL,
+		issuer:                    strings.TrimRight(cfg.Issuer, "/"),
+		identity:                  cfg.Identity,
+		idpTrust:                  cfg.IdPTrust,
+		keys:                      keys,
+		nodes:                     nodes,
+		denylist:                  dl,
+		nhiTTL:                    cfg.NHITokenTTL,
+		humanTTL:                  cfg.HumanTokenTTL,
+		sessionTTL:                cfg.LocalSessionTTL,
+		adminIntegrationClientIDs: adminClientIDs,
 	}
 	if as.nhiTTL <= 0 {
 		as.nhiTTL = DefaultNHITokenTTL
@@ -177,6 +201,19 @@ func (a *AuthServer) resourceURI(node string) string {
 // for building a WWW-Authenticate header (internal/proxy calls this).
 func (a *AuthServer) MetadataURL(node string) string {
 	return a.issuer + "/.well-known/oauth-protected-resource/" + node
+}
+
+// adminResourceURI is AdminResource's canonical RFC 8707 identifier, the
+// same "issuer + path" shape resourceURI uses for nodes but never
+// collidable with one (nodes route under /mcp/, this doesn't).
+func (a *AuthServer) adminResourceURI() string {
+	return a.issuer + "/" + AdminResource
+}
+
+// isAdminResource accepts either the bare reserved value or its full URI
+// form, mirroring resolveNode's bare-name-or-URI convenience for nodes.
+func (a *AuthServer) isAdminResource(resource string) bool {
+	return resource == AdminResource || resource == a.adminResourceURI()
 }
 
 // resolveNode accepts either a bare node name or that node's full
@@ -220,6 +257,30 @@ func (a *AuthServer) ValidateAccessToken(node, tokenString string) (Claims, erro
 	return *claims, nil
 }
 
+// ValidateAdminAccessToken is internal/adminapi's hot-path call --
+// mirrors ValidateAccessToken exactly, just checking aud against
+// adminResourceURI instead of a specific node's resourceURI, so an
+// ordinary node-scoped token (or vice versa, an admin-scoped one
+// presented to the MCP data plane) is never interchangeable with this
+// one -- the two audiences are structurally distinct values.
+func (a *AuthServer) ValidateAdminAccessToken(tokenString string) (Claims, error) {
+	claims, err := parseAndVerify(a.keys, tokenString, typAccess)
+	if err != nil {
+		return Claims{}, err
+	}
+	if claims.Issuer != a.issuer {
+		return Claims{}, ErrTokenWrongIssuer
+	}
+	want := a.adminResourceURI()
+	if len(claims.Audience) != 1 || claims.Audience[0] != want {
+		return Claims{}, ErrTokenWrongAudience
+	}
+	if a.denylist.isRevoked(claims.ID) {
+		return Claims{}, ErrTokenRevoked
+	}
+	return *claims, nil
+}
+
 // RevokeJTI immediately denylists jti (design doc: revoked tokens rejected
 // on every subsequent request, not just the next one) and persists the
 // revocation so it survives a restart.
@@ -241,6 +302,32 @@ func (a *AuthServer) mintAccessToken(sub, act, node string, ttl time.Duration) (
 			Subject:   sub,
 			Audience:  jwt.ClaimStrings{a.resourceURI(node)},
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ID:        jti,
+		},
+	}
+	signed, err = a.keys.sign(claims, typAccess)
+	return signed, claims, err
+}
+
+// mintAdminAccessToken mirrors mintAccessToken, scoped to adminResourceURI
+// instead of a node, and always sub'd to an agent (issue #13: the admin
+// API's service-to-service leg is NHI-only -- the human behind the
+// request is established separately, via live introspection, not by this
+// token). Same NHI TTL posture as an ordinary agent token.
+func (a *AuthServer) mintAdminAccessToken(sub string) (signed string, claims *Claims, err error) {
+	jti, err := randomID()
+	if err != nil {
+		return "", nil, err
+	}
+	now := time.Now()
+	claims = &Claims{
+		Scope: "admin:manage",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    a.issuer,
+			Subject:   sub,
+			Audience:  jwt.ClaimStrings{a.adminResourceURI()},
+			ExpiresAt: jwt.NewNumericDate(now.Add(a.nhiTTL)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ID:        jti,
 		},
@@ -316,7 +403,22 @@ func (a *AuthServer) ServeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node, ok := a.resolveNode(r.FormValue("resource"))
+	resource := r.FormValue("resource")
+	if a.isAdminResource(resource) {
+		// The admin resource only ever supports client_credentials --
+		// admin API access is NHI-only at the token layer (the human
+		// behind a request is established separately, via live
+		// introspection, not by minting them a node-shaped Mode A/B
+		// token for a resource that isn't a real MCP node).
+		if r.FormValue("grant_type") != grantClientCredentials {
+			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type", "the admin resource only supports client_credentials")
+			return
+		}
+		a.handleAdminClientCredentials(w, r)
+		return
+	}
+
+	node, ok := a.resolveNode(resource)
 	if !ok {
 		writeTokenError(w, http.StatusBadRequest, "invalid_target", "resource must name a registered node")
 		return
@@ -344,6 +446,34 @@ func (a *AuthServer) handleClientCredentials(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	signed, claims, err := a.mintAccessToken("agent:"+agent.ClientID, "", node, a.nhiTTL)
+	if err != nil {
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to mint token")
+		return
+	}
+	writeTokenResponse(w, signed, claims, "")
+}
+
+// handleAdminClientCredentials mints an AdminResource-scoped token
+// (issue #13) -- same credential check as an ordinary NHI, plus one more
+// gate ordinary node tokens don't have: the authenticated agent's
+// client_id must be in the config-designated allowlist. A non-
+// allowlisted (but otherwise valid) agent gets the exact same
+// invalid_client response as a wrong secret -- "this agent exists but
+// isn't allowed to mint admin tokens" must never be distinguishable from
+// "these credentials don't work at all," the same non-enumeration
+// posture AuthenticateAgent already takes.
+func (a *AuthServer) handleAdminClientCredentials(w http.ResponseWriter, r *http.Request) {
+	clientID, secret := clientCredentialsFromRequest(r)
+	agent, err := a.identity.AuthenticateAgent(r.Context(), clientID, secret)
+	if err != nil {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
+		return
+	}
+	if _, allowed := a.adminIntegrationClientIDs[agent.ClientID]; !allowed {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
+		return
+	}
+	signed, claims, err := a.mintAdminAccessToken("agent:" + agent.ClientID)
 	if err != nil {
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to mint token")
 		return

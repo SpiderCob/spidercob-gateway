@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/adminapi"
 	"github.com/sumeetgp/spidercob-gateway/internal/authserver"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
@@ -31,6 +32,20 @@ func (a authValidator) ValidateAccessToken(node, token string) (proxy.AuthClaims
 		return proxy.AuthClaims{}, err
 	}
 	return proxy.AuthClaims{Subject: c.Subject, Act: c.Act}, nil
+}
+
+// adminAuthValidator adapts *authserver.AuthServer to
+// adminapi.AdminTokenValidator, the same "define the minimal interface
+// in the dependent package, adapt here" pattern authValidator already
+// uses for proxy.TokenValidator (issue #13).
+type adminAuthValidator struct{ as *authserver.AuthServer }
+
+func (a adminAuthValidator) ValidateAdminAccessToken(token string) (adminapi.AdminClaims, error) {
+	c, err := a.as.ValidateAdminAccessToken(token)
+	if err != nil {
+		return adminapi.AdminClaims{}, err
+	}
+	return adminapi.AdminClaims{Subject: c.Subject}, nil
 }
 
 // getOrCreateGroup resolves a group by name, creating it if it doesn't
@@ -153,14 +168,15 @@ func main() {
 	}
 
 	as, err := authserver.New(context.Background(), authserver.Config{
-		Issuer:          cfg.Issuer,
-		Nodes:           nodeNames,
-		Identity:        identitySvc,
-		Store:           db,
-		IdPTrust:        trust,
-		NHITokenTTL:     time.Duration(cfg.NHITokenTTLSeconds) * time.Second,
-		HumanTokenTTL:   time.Duration(cfg.HumanTokenTTLSeconds) * time.Second,
-		LocalSessionTTL: time.Duration(cfg.LocalSessionTTLSeconds) * time.Second,
+		Issuer:                    cfg.Issuer,
+		Nodes:                     nodeNames,
+		Identity:                  identitySvc,
+		Store:                     db,
+		IdPTrust:                  trust,
+		NHITokenTTL:               time.Duration(cfg.NHITokenTTLSeconds) * time.Second,
+		HumanTokenTTL:             time.Duration(cfg.HumanTokenTTLSeconds) * time.Second,
+		LocalSessionTTL:           time.Duration(cfg.LocalSessionTTLSeconds) * time.Second,
+		AdminIntegrationClientIDs: cfg.AdminIntegrationClientIDs,
 	})
 	if err != nil {
 		slog.Error("failed to build authserver", "err", err)
@@ -206,6 +222,29 @@ func main() {
 	pinScheduler.Start()
 	defer pinScheduler.Stop()
 
+	// Admin API (issue #13): mounted only when both admin_integration_
+	// client_ids and spider_snoop_base_url are set -- config.Load already
+	// refuses a half-configured combination, so AdminAPIEnabled() here is
+	// a clean on/off switch, not a partial-state check.
+	var adminAPI *adminapi.AdminAPI
+	if cfg.AdminAPIEnabled() {
+		introspector := adminapi.NewCachingIntrospector(
+			adminapi.NewHTTPIntrospector(cfg.SpiderSnoopBaseURL, time.Duration(cfg.SpiderSnoopIntrospectionTimeoutSeconds)*time.Second),
+			time.Duration(cfg.SpiderSnoopIntrospectionCacheTTLSeconds)*time.Second,
+		)
+		adminAPI, err = adminapi.New(adminapi.Config{
+			Store:        db,
+			Identity:     identitySvc,
+			Authn:        adminAuthValidator{as: as},
+			Introspector: introspector,
+		})
+		if err != nil {
+			slog.Error("failed to build adminapi", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("admin API enabled", "spider_snoop_base_url", cfg.SpiderSnoopBaseURL, "integration_agents", len(cfg.AdminIntegrationClientIDs))
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -223,6 +262,9 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/", as.Routes()) // /token, JWKS, RFC 9728 metadata
 	mux.Handle("/mcp/", gw)
+	if adminAPI != nil {
+		mux.Handle("/admin/", adminAPI.Routes())
+	}
 
 	slog.Info("spidercob gateway listening", "addr", cfg.Listen, "nodes", len(cfg.Nodes), "issuer", cfg.Issuer)
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {

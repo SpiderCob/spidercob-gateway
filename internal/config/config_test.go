@@ -132,6 +132,66 @@ func TestLoad_ScanDetectEmailPhoneOptIn(t *testing.T) {
 	}
 }
 
+func TestLoad_AdminAPIDisabledByDefault(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminAPIEnabled() {
+		t.Fatal("AdminAPIEnabled() = true, want false when neither field is set")
+	}
+}
+
+func TestLoad_AdminAPIEnabledWithBothFieldsSet(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000"}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AdminAPIEnabled() {
+		t.Fatal("AdminAPIEnabled() = false, want true when both fields are set")
+	}
+	if len(cfg.AdminIntegrationClientIDs) != 1 || cfg.AdminIntegrationClientIDs[0] != "agt_spidersnoop" {
+		t.Fatalf("AdminIntegrationClientIDs = %v, want [agt_spidersnoop]", cfg.AdminIntegrationClientIDs)
+	}
+	if cfg.SpiderSnoopIntrospectionTimeoutSeconds != DefaultSpiderSnoopIntrospectionTimeoutSeconds {
+		t.Fatalf("SpiderSnoopIntrospectionTimeoutSeconds = %d, want default %d", cfg.SpiderSnoopIntrospectionTimeoutSeconds, DefaultSpiderSnoopIntrospectionTimeoutSeconds)
+	}
+	if cfg.SpiderSnoopIntrospectionCacheTTLSeconds != DefaultSpiderSnoopIntrospectionCacheTTLSeconds {
+		t.Fatalf("SpiderSnoopIntrospectionCacheTTLSeconds = %d, want default %d", cfg.SpiderSnoopIntrospectionCacheTTLSeconds, DefaultSpiderSnoopIntrospectionCacheTTLSeconds)
+	}
+}
+
+func TestLoad_AdminAPIOverridesApplied(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000","spider_snoop_introspection_timeout_seconds":2,"spider_snoop_introspection_cache_ttl_seconds":10}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SpiderSnoopIntrospectionTimeoutSeconds != 2 {
+		t.Fatalf("SpiderSnoopIntrospectionTimeoutSeconds = %d, want 2", cfg.SpiderSnoopIntrospectionTimeoutSeconds)
+	}
+	if cfg.SpiderSnoopIntrospectionCacheTTLSeconds != 10 {
+		t.Fatalf("SpiderSnoopIntrospectionCacheTTLSeconds = %d, want 10", cfg.SpiderSnoopIntrospectionCacheTTLSeconds)
+	}
+}
+
+func TestLoad_AdminAPIHalfConfiguredFailsLoudly(t *testing.T) {
+	cases := []string{
+		`{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"]}`,
+		`{"nodes":[],"spider_snoop_base_url":"http://spider-snoop.internal:8000"}`,
+	}
+	for _, body := range cases {
+		t.Run(body, func(t *testing.T) {
+			path := writeConfig(t, body)
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected an error for a half-configured admin API integration, got nil")
+			}
+		})
+	}
+}
+
 func TestLoad_SeedAgentRequiresAllFields(t *testing.T) {
 	path := writeConfig(t, `{"nodes":[],"seed_agents":[{"client_id":"a"}]}`)
 	if _, err := Load(path); err == nil {
