@@ -4,9 +4,10 @@ import Login from './screens/Login'
 import Agents from './screens/Agents'
 import Groups from './screens/Groups'
 import Policies from './screens/Policies'
+import Nodes from './screens/Nodes'
 import './App.css'
 
-type Tab = 'agents' | 'groups' | 'policies'
+type Tab = 'agents' | 'groups' | 'policies' | 'nodes'
 
 export default function App() {
   // null = still checking; undefined = checked, not logged in.
@@ -55,11 +56,15 @@ export default function App() {
         <button className={tab === 'policies' ? 'active' : ''} onClick={() => setTab('policies')}>
           Policies
         </button>
+        <button className={tab === 'nodes' ? 'active' : ''} onClick={() => setTab('nodes')}>
+          Nodes
+        </button>
       </nav>
       <main>
         {tab === 'agents' && <Agents />}
         {tab === 'groups' && <Groups />}
         {tab === 'policies' && <Policies />}
+        {tab === 'nodes' && <Nodes />}
       </main>
     </div>
   )

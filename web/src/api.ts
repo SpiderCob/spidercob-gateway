@@ -134,3 +134,39 @@ export function listPolicies(): Promise<PolicyRule[]> {
 export function replacePolicies(rules: PolicyRule[]): Promise<void> {
   return request<void>('PUT', '/admin/policies', rules)
 }
+
+// --- Nodes (issue #19: cookie-authenticated same as everything above) ---
+
+export type Transport = 'streamable_http' | 'stdio'
+
+export interface Node {
+  name: string
+  transport: Transport
+  upstream_url?: string
+  command?: string
+  args?: string[]
+  pin_refresh_interval_seconds?: number
+  source: 'config' | 'admin'
+  created_at: string
+}
+
+export interface CreateNodeInput {
+  name: string
+  transport: Transport
+  upstream_url?: string
+  command?: string
+  args?: string[]
+  pin_refresh_interval_seconds?: number
+}
+
+export function listNodes(): Promise<Node[]> {
+  return request<Node[]>('GET', '/admin/nodes')
+}
+
+export function createNode(input: CreateNodeInput): Promise<Node> {
+  return request<Node>('POST', '/admin/nodes', input)
+}
+
+export function deleteNode(name: string): Promise<void> {
+  return request<void>('DELETE', `/admin/nodes/${encodeURIComponent(name)}`)
+}
