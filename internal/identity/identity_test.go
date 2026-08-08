@@ -119,6 +119,35 @@ func TestAgentCreateAndAuthenticate(t *testing.T) {
 	}
 }
 
+func TestAuthenticateAgent_RevokedAgentRejected(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	svc := NewService(s)
+	ctx := context.Background()
+
+	agent, secret, err := svc.CreateAgent(ctx, "revoke-me")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if _, err := svc.AuthenticateAgent(ctx, agent.ClientID, secret); err != nil {
+		t.Fatalf("AuthenticateAgent (before revocation): %v", err)
+	}
+
+	if err := s.RevokeAgent(ctx, agent.ClientID); err != nil {
+		t.Fatalf("RevokeAgent: %v", err)
+	}
+
+	// A revoked agent's otherwise-correct secret must be rejected exactly
+	// like a wrong one -- not distinguishably, so revocation can never be
+	// probed for via the error shape (issue #13).
+	if _, err := svc.AuthenticateAgent(ctx, agent.ClientID, secret); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("AuthenticateAgent (after revocation) = %v, want ErrInvalidCredentials", err)
+	}
+}
+
 func TestResolveOrCreateExternalUser_FirstLoginProvisionsZeroGroupAccount(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

@@ -58,6 +58,15 @@ const (
 	// refresh interval (mirrors idleReapInterval's role for the
 	// idle-session reaper).
 	DefaultPinCheckIntervalSeconds = 10
+	// DefaultSpiderSnoopIntrospectionTimeoutSeconds bounds a single live
+	// GET {base}/api/users/me call (issue #13) -- short, since this sits
+	// in the request path of every admin API call.
+	DefaultSpiderSnoopIntrospectionTimeoutSeconds = 5
+	// DefaultSpiderSnoopIntrospectionCacheTTLSeconds bounds how stale a
+	// cached introspection result can be -- short enough that a
+	// spider-snoop logout is respected promptly, long enough that a burst
+	// of admin requests doesn't cost a live network call each.
+	DefaultSpiderSnoopIntrospectionCacheTTLSeconds = 30
 )
 
 type Config struct {
@@ -81,12 +90,14 @@ type Config struct {
 	LocalSessionTTLSeconds int `json:"local_session_ttl_seconds,omitempty"`
 
 	// SeedAgents declares NHI credentials with known, caller-chosen
-	// secrets, created idempotently on startup. There's no admin API to
-	// register agents yet (Phase 4) -- this is the bootstrap path until
-	// then, primarily for automation/run-e2e-auth.sh to mint real tokens
-	// against the compiled binary via curl. Real deployments should prefer
-	// whatever the admin API becomes once it exists; a secret written into
-	// a config file is weaker than a generated one.
+	// secrets, created idempotently on startup. Primarily for
+	// automation/run-e2e-*.sh to mint real tokens against the compiled
+	// binary via curl, and for bootstrapping the one agent
+	// (AdminIntegrationClientIDs) that's allowed to call the admin API
+	// (issue #13) before any admin API call could otherwise create it.
+	// Real deployments should prefer internal/adminapi's agent-creation
+	// endpoint for anything else; a secret written into a config file is
+	// weaker than a generated one.
 	SeedAgents []SeedAgent `json:"seed_agents,omitempty"`
 
 	// DevAllowAllPolicy, if true, makes the gateway use policy.AllowAll{}
@@ -137,6 +148,39 @@ type Config struct {
 	// SecretScanner already takes.
 	ScanDetectEmail bool `json:"scan_detect_email,omitempty"`
 	ScanDetectPhone bool `json:"scan_detect_phone,omitempty"`
+
+	// AdminIntegrationClientIDs and SpiderSnoopBaseURL together enable
+	// internal/adminapi (issue #13). AdminIntegrationClientIDs is the
+	// allowlist of agent client_ids permitted to mint a token for the
+	// reserved admin resource -- ordinary per-node tokens stay open to
+	// any authenticated agent, but this one is not. SpiderSnoopBaseURL is
+	// where the admin API live-introspects a human's session
+	// (GET {base}/api/users/me) to confirm they currently hold an
+	// admin/superadmin role in spider-snoop. Both must be set together,
+	// or neither -- the admin API is entirely disabled (no /admin/*
+	// routes mounted) if both are empty, and Load fails loudly rather
+	// than starting in a half-configured state if only one is set.
+	AdminIntegrationClientIDs []string `json:"admin_integration_client_ids,omitempty"`
+	SpiderSnoopBaseURL        string   `json:"spider_snoop_base_url,omitempty"`
+	// SpiderSnoopIntrospectionTimeoutSeconds bounds how long a hung
+	// spider-snoop can block an admin request before the gateway fails
+	// closed (never open) on it. SpiderSnoopIntrospectionCacheTTLSeconds
+	// bounds how stale a cached "is this human currently an admin" result
+	// can be -- a deliberate, short, explicit staleness window, not zero
+	// (every admin request would otherwise cost a live network call to
+	// spider-snoop) and not unbounded (a spider-snoop logout wouldn't be
+	// respected promptly). Both fall back to their Default* constants
+	// when the admin integration is enabled but these are unset.
+	SpiderSnoopIntrospectionTimeoutSeconds  int `json:"spider_snoop_introspection_timeout_seconds,omitempty"`
+	SpiderSnoopIntrospectionCacheTTLSeconds int `json:"spider_snoop_introspection_cache_ttl_seconds,omitempty"`
+}
+
+// AdminAPIEnabled reports whether internal/adminapi's routes should be
+// mounted at all -- both AdminIntegrationClientIDs and SpiderSnoopBaseURL
+// must be set (Load already refuses a half-configured combination, so by
+// the time this is called it's an all-or-nothing question).
+func (c *Config) AdminAPIEnabled() bool {
+	return len(c.AdminIntegrationClientIDs) > 0 && c.SpiderSnoopBaseURL != ""
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See
@@ -239,6 +283,19 @@ func Load(path string) (*Config, error) {
 	}
 	if c.PinCheckIntervalSeconds <= 0 {
 		c.PinCheckIntervalSeconds = DefaultPinCheckIntervalSeconds
+	}
+	haveClientIDs := len(c.AdminIntegrationClientIDs) > 0
+	haveBaseURL := c.SpiderSnoopBaseURL != ""
+	if haveClientIDs != haveBaseURL {
+		return nil, fmt.Errorf("admin_integration_client_ids and spider_snoop_base_url must be set together (both, or neither) -- got client_ids=%v, base_url=%q", c.AdminIntegrationClientIDs, c.SpiderSnoopBaseURL)
+	}
+	if c.AdminAPIEnabled() {
+		if c.SpiderSnoopIntrospectionTimeoutSeconds <= 0 {
+			c.SpiderSnoopIntrospectionTimeoutSeconds = DefaultSpiderSnoopIntrospectionTimeoutSeconds
+		}
+		if c.SpiderSnoopIntrospectionCacheTTLSeconds <= 0 {
+			c.SpiderSnoopIntrospectionCacheTTLSeconds = DefaultSpiderSnoopIntrospectionCacheTTLSeconds
+		}
 	}
 	for i, n := range c.Nodes {
 		if n.Name == "" {

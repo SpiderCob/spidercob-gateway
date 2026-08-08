@@ -65,6 +65,17 @@ instead of something re-typed by hand each time.
   policy/quarantine denial), all before ever reaching the upstream. Not
   part of `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-adminapi.sh`** — issue #13's admin API (Phase 4), against
+  the real compiled binary: a real `_admin`-audience NHI token minted via
+  the compiled binary's own `/token` endpoint (only the config-designated
+  integration agent can mint it — a non-allowlisted agent is proven
+  rejected first), plus a real (fixture, not spider-snoop itself) HTTP
+  server standing in for spider-snoop's `GET /api/users/me`. Drives real
+  `/admin/*` operations (create agent, create group, assign membership,
+  replace policy) through the full dual-trust gate and confirms the
+  store-visible effects via the same API afterward. Not part of
+  `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

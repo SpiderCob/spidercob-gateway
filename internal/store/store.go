@@ -1,12 +1,14 @@
 // Package store abstracts persistence. SQLite (modernc.org/sqlite, no cgo)
 // is the phase-2 implementation; Postgres arrives with HA (design doc §8).
 //
-// Scope as of Phase 3b (issue #9): users, agents (NHI), groups,
+// Scope as of Phase 4 (issue #13): users, agents (NHI, now soft-revocable
+// via RevokedAt), groups (now deletable, membership now removable),
 // user_groups, agent_groups, revocations (issue #3), external_identities
-// (JIT-provisioned Mode B users, issue #5), policies (issue #7), and now
+// (JIT-provisioned Mode B users, issue #5), policies (issue #7), and
 // tool_pins (issue #9). Trusted external-IdP config (idp_trust in design
 // doc §8) stays config-file-only, same bootstrap pattern as SeedAgents --
-// no admin API exists yet to justify persisting it; policies and
+// internal/adminapi (issue #13) manages agents/groups/policies over HTTP
+// now, but idp_trust still has no admin-managed equivalent; policies and
 // tool_pins are tables (not config-only) because both need a real query
 // surface on the hot path (PoliciesForGroups, GetToolPin), not just a
 // one-time bootstrap read -- and tool_pins specifically must survive a
@@ -41,12 +43,17 @@ type User struct {
 
 // Agent is a non-human identity (NHI): a service account authenticating via
 // client_credentials. SecretHash is opaque here, same as User.PasswordHash.
+// RevokedAt is nil until an admin revokes the agent (issue #13) -- soft,
+// never a hard delete, so agent_groups and any future audit references
+// stay intact; AuthenticateAgent (internal/identity) must treat a revoked
+// agent's otherwise-valid credentials the same as ErrInvalidCredentials.
 type Agent struct {
 	ID         int64
 	ClientID   string
 	SecretHash string
 	Name       string
 	CreatedAt  time.Time
+	RevokedAt  *time.Time
 }
 
 // Group is a named policy-assignment target. Membership tables
@@ -155,6 +162,13 @@ type Store interface {
 	CreateAgent(ctx context.Context, clientID, secretHash, name string) (Agent, error)
 	GetAgentByClientID(ctx context.Context, clientID string) (Agent, error)
 	GetAgentByID(ctx context.Context, id int64) (Agent, error)
+	// ListAgents returns every registered agent, revoked or not -- the
+	// caller (issue #13's admin API) decides how to present that.
+	ListAgents(ctx context.Context) ([]Agent, error)
+	// RevokeAgent soft-revokes an agent (sets RevokedAt, never deletes the
+	// row). Idempotent: revoking an already-revoked agent is not an error.
+	// Returns ErrNotFound if no agent with this client_id exists.
+	RevokeAgent(ctx context.Context, clientID string) error
 
 	// GetUserByExternalIdentity resolves a user previously JIT-provisioned
 	// for this (issuer, subject) pair. Returns ErrNotFound on first login.
@@ -175,8 +189,22 @@ type Store interface {
 	// Policies, issue #7) needs this to resolve an already-existing group
 	// after CreateGroup returns ErrConflict.
 	GetGroupByName(ctx context.Context, name string) (Group, error)
+	// ListGroups returns every group.
+	ListGroups(ctx context.Context) ([]Group, error)
+	// DeleteGroup removes a group. Returns ErrConflict if any policy row
+	// still references it -- the groups/policies FK is ON DELETE CASCADE
+	// at the schema level (so a raw DELETE would succeed by silently
+	// wiping those policy rows too), but a group deletion silently
+	// discarding an admin's configured allow/deny rules is exactly the
+	// "dangling, confusing policy state" issue #13 exists to prevent, so
+	// this checks and refuses first rather than relying on that cascade.
+	DeleteGroup(ctx context.Context, name string) error
 	AssignUserGroup(ctx context.Context, userID, groupID int64) error
 	AssignAgentGroup(ctx context.Context, agentID, groupID int64) error
+	// RemoveUserGroup/RemoveAgentGroup undo AssignUserGroup/AssignAgentGroup.
+	// Idempotent: removing a membership that doesn't exist is not an error.
+	RemoveUserGroup(ctx context.Context, userID, groupID int64) error
+	RemoveAgentGroup(ctx context.Context, agentID, groupID int64) error
 	UserGroups(ctx context.Context, userID int64) ([]Group, error)
 	AgentGroups(ctx context.Context, agentID int64) ([]Group, error)
 
@@ -192,6 +220,10 @@ type Store interface {
 	// PoliciesForGroups returns every policy rule attached to any of
 	// groupIDs, scoped to node -- the evaluator's hot-path query.
 	PoliciesForGroups(ctx context.Context, groupIDs []int64, node string) ([]Policy, error)
+	// AllPolicies returns every policy row, unfiltered -- issue #13's
+	// admin API view, not scoped to any one principal the way
+	// PoliciesForGroups is.
+	AllPolicies(ctx context.Context) ([]Policy, error)
 
 	// GetToolPin looks up one (node, tool_name) pin. Returns ErrNotFound
 	// if this tool has never been observed for this node -- the caller

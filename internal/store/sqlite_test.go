@@ -123,6 +123,59 @@ func TestAgentCRUD(t *testing.T) {
 	}
 }
 
+func TestListAgents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateAgent(ctx, "client-a", "hash-a", "agent-a"); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if _, err := s.CreateAgent(ctx, "client-b", "hash-b", "agent-b"); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("ListAgents = %+v, want 2 agents", agents)
+	}
+}
+
+func TestRevokeAgent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	a, err := s.CreateAgent(ctx, "client-r", "hash", "revoke-me")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	if a.RevokedAt != nil {
+		t.Fatalf("newly created agent has RevokedAt = %v, want nil", a.RevokedAt)
+	}
+
+	if err := s.RevokeAgent(ctx, "client-r"); err != nil {
+		t.Fatalf("RevokeAgent: %v", err)
+	}
+	revoked, err := s.GetAgentByClientID(ctx, "client-r")
+	if err != nil {
+		t.Fatalf("GetAgentByClientID: %v", err)
+	}
+	if revoked.RevokedAt == nil {
+		t.Fatalf("expected RevokedAt to be set after RevokeAgent")
+	}
+
+	// Idempotent: revoking again is not an error.
+	if err := s.RevokeAgent(ctx, "client-r"); err != nil {
+		t.Fatalf("RevokeAgent (again): %v", err)
+	}
+
+	if err := s.RevokeAgent(ctx, "never-existed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RevokeAgent (unknown client_id) = %v, want ErrNotFound", err)
+	}
+}
+
 func TestExternalIdentityResolveOrCreate(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -416,6 +469,42 @@ func TestReplacePoliciesAndPoliciesForGroups(t *testing.T) {
 	}
 }
 
+func TestAllPolicies(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	empty, err := s.AllPolicies(ctx)
+	if err != nil {
+		t.Fatalf("AllPolicies (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected no policies yet, got %+v", empty)
+	}
+
+	eng, err := s.CreateGroup(ctx, "engineering")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	sre, err := s.CreateGroup(ctx, "sre")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.ReplacePolicies(ctx, []NewPolicy{
+		{GroupID: eng.ID, Node: "jira", RuleType: PolicyAllow},
+		{GroupID: sre.ID, Node: "postgres-ro", RuleType: PolicyDeny},
+	}); err != nil {
+		t.Fatalf("ReplacePolicies: %v", err)
+	}
+
+	all, err := s.AllPolicies(ctx)
+	if err != nil {
+		t.Fatalf("AllPolicies: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("AllPolicies = %+v, want 2 policies (unfiltered, across every group)", all)
+	}
+}
+
 func TestGetGroupByName(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -486,6 +575,120 @@ func TestGroupMembership(t *testing.T) {
 
 	if _, err := s.CreateGroup(ctx, "engineering"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate CreateGroup = %v, want ErrConflict", err)
+	}
+}
+
+func TestListGroups(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGroup(ctx, "engineering"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if _, err := s.CreateGroup(ctx, "support"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	groups, err := s.ListGroups(ctx)
+	if err != nil {
+		t.Fatalf("ListGroups: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("ListGroups = %+v, want 2 groups", groups)
+	}
+}
+
+func TestDeleteGroup(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateGroup(ctx, "throwaway"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.DeleteGroup(ctx, "throwaway"); err != nil {
+		t.Fatalf("DeleteGroup: %v", err)
+	}
+	if _, err := s.GetGroupByName(ctx, "throwaway"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetGroupByName after delete = %v, want ErrNotFound", err)
+	}
+
+	if err := s.DeleteGroup(ctx, "never-existed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("DeleteGroup (unknown name) = %v, want ErrNotFound", err)
+	}
+
+	// A group still referenced by a policy must not be silently
+	// deletable, even though the schema's own FK is ON DELETE CASCADE --
+	// deleting the group would otherwise silently wipe that policy row
+	// too (story 27).
+	g2, err := s.CreateGroup(ctx, "policy-holder")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.ReplacePolicies(ctx, []NewPolicy{
+		{GroupID: g2.ID, Node: "jira", RuleType: PolicyAllow},
+	}); err != nil {
+		t.Fatalf("ReplacePolicies: %v", err)
+	}
+	if err := s.DeleteGroup(ctx, "policy-holder"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("DeleteGroup (still referenced by a policy) = %v, want ErrConflict", err)
+	}
+	if _, err := s.GetGroupByName(ctx, "policy-holder"); err != nil {
+		t.Fatalf("group must still exist after a refused delete: %v", err)
+	}
+}
+
+func TestRemoveGroupMembership(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUser(ctx, "carol", "hash")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	a, err := s.CreateAgent(ctx, "client-rm", "hash", "job")
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	g, err := s.CreateGroup(ctx, "temp-access")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	if err := s.AssignUserGroup(ctx, u.ID, g.ID); err != nil {
+		t.Fatalf("AssignUserGroup: %v", err)
+	}
+	if err := s.AssignAgentGroup(ctx, a.ID, g.ID); err != nil {
+		t.Fatalf("AssignAgentGroup: %v", err)
+	}
+
+	if err := s.RemoveUserGroup(ctx, u.ID, g.ID); err != nil {
+		t.Fatalf("RemoveUserGroup: %v", err)
+	}
+	if err := s.RemoveAgentGroup(ctx, a.ID, g.ID); err != nil {
+		t.Fatalf("RemoveAgentGroup: %v", err)
+	}
+
+	userGroups, err := s.UserGroups(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("UserGroups: %v", err)
+	}
+	if len(userGroups) != 0 {
+		t.Fatalf("UserGroups after removal = %+v, want none", userGroups)
+	}
+	agentGroups, err := s.AgentGroups(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("AgentGroups: %v", err)
+	}
+	if len(agentGroups) != 0 {
+		t.Fatalf("AgentGroups after removal = %+v, want none", agentGroups)
+	}
+
+	// Idempotent: removing a membership that doesn't exist is not an error.
+	if err := s.RemoveUserGroup(ctx, u.ID, g.ID); err != nil {
+		t.Fatalf("RemoveUserGroup (already removed): %v", err)
+	}
+	if err := s.RemoveAgentGroup(ctx, a.ID, g.ID); err != nil {
+		t.Fatalf("RemoveAgentGroup (already removed): %v", err)
 	}
 }
 
