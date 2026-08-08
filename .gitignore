@@ -3,5 +3,6 @@ config.json
 *.db
 *.db-shm
 *.db-wal
-dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
 vectors/*.json

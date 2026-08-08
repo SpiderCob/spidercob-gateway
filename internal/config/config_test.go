@@ -161,10 +161,13 @@ func TestLoad_AdminAPIEnabledWithBothFieldsSet(t *testing.T) {
 	if cfg.SpiderSnoopIntrospectionCacheTTLSeconds != DefaultSpiderSnoopIntrospectionCacheTTLSeconds {
 		t.Fatalf("SpiderSnoopIntrospectionCacheTTLSeconds = %d, want default %d", cfg.SpiderSnoopIntrospectionCacheTTLSeconds, DefaultSpiderSnoopIntrospectionCacheTTLSeconds)
 	}
+	if cfg.AdminUISessionMaxAgeSeconds != DefaultAdminUISessionMaxAgeSeconds {
+		t.Fatalf("AdminUISessionMaxAgeSeconds = %d, want default %d", cfg.AdminUISessionMaxAgeSeconds, DefaultAdminUISessionMaxAgeSeconds)
+	}
 }
 
 func TestLoad_AdminAPIOverridesApplied(t *testing.T) {
-	path := writeConfig(t, `{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000","spider_snoop_introspection_timeout_seconds":2,"spider_snoop_introspection_cache_ttl_seconds":10}`)
+	path := writeConfig(t, `{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000","spider_snoop_introspection_timeout_seconds":2,"spider_snoop_introspection_cache_ttl_seconds":10,"admin_ui_session_max_age_seconds":3600}`)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -174,6 +177,9 @@ func TestLoad_AdminAPIOverridesApplied(t *testing.T) {
 	}
 	if cfg.SpiderSnoopIntrospectionCacheTTLSeconds != 10 {
 		t.Fatalf("SpiderSnoopIntrospectionCacheTTLSeconds = %d, want 10", cfg.SpiderSnoopIntrospectionCacheTTLSeconds)
+	}
+	if cfg.AdminUISessionMaxAgeSeconds != 3600 {
+		t.Fatalf("AdminUISessionMaxAgeSeconds = %d, want 3600", cfg.AdminUISessionMaxAgeSeconds)
 	}
 }
 

@@ -1,6 +1,17 @@
-.PHONY: build test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes ci ci-interop run docker
+.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session ci ci-interop run docker
 
-build:
+# web builds the admin UI's static assets into internal/webui/dist
+# (issue #17) -- required before `go build`/`go vet`/`go test ./...`
+# will produce a UI-serving binary; without it, the repo still builds
+# fine (internal/webui/dist/.gitkeep keeps the go:embed directive
+# happy), it just serves 404s under /ui/. `make build` and `make ci`
+# both depend on this so a fresh clone gets a complete build by
+# default; run it manually after frontend-only changes if you're not
+# going through `make build`/`make ci`.
+web:
+	cd web && npm ci && npm run build
+
+build: web
 	go build -o spidercob ./cmd/spidercob
 
 test:
@@ -24,7 +35,10 @@ e2e-adminapi:
 e2e-nodes:
 	./automation/run-e2e-nodes.sh
 
-ci: ## fast suite + real end-to-end validation -- run before opening a PR
+e2e-adminui-session:
+	./automation/run-e2e-adminui-session.sh
+
+ci: web ## fast suite + real end-to-end validation -- run before opening a PR (builds the admin UI first, issue #17)
 	./automation/run-all.sh
 
 ci-interop: ## real Keycloak ID-JAG interop (issue #5) -- needs Docker; required before a Phase 2b PR, separate from `ci` since not every environment has Docker

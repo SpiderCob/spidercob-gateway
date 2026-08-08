@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"time"
+
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
+	"github.com/sumeetgp/spidercob-gateway/internal/uisession"
 )
 
 type fakeAdminTokenValidator struct {
@@ -39,7 +42,8 @@ func newTestAdminAPI(t *testing.T, authn AdminTokenValidator, introspector Spide
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	svc := identity.NewService(s)
-	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector})
+	sessions := uisession.NewRegistry(uisession.RegistryConfig{MaxAge: time.Hour})
+	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector, UISessions: sessions})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

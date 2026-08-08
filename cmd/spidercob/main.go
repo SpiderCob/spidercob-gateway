@@ -19,6 +19,8 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/policy"
 	"github.com/sumeetgp/spidercob-gateway/internal/proxy"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
+	"github.com/sumeetgp/spidercob-gateway/internal/uisession"
+	"github.com/sumeetgp/spidercob-gateway/internal/webui"
 )
 
 // authValidator adapts *authserver.AuthServer to proxy.TokenValidator so
@@ -296,11 +298,15 @@ func main() {
 			adminapi.NewHTTPIntrospector(cfg.SpiderSnoopBaseURL, time.Duration(cfg.SpiderSnoopIntrospectionTimeoutSeconds)*time.Second),
 			time.Duration(cfg.SpiderSnoopIntrospectionCacheTTLSeconds)*time.Second,
 		)
+		uiSessions := uisession.NewRegistry(uisession.RegistryConfig{
+			MaxAge: time.Duration(cfg.AdminUISessionMaxAgeSeconds) * time.Second,
+		})
 		adminAPI, err = adminapi.New(adminapi.Config{
 			Store:        db,
 			Identity:     identitySvc,
 			Authn:        adminAuthValidator{as: as},
 			Introspector: introspector,
+			UISessions:   uiSessions,
 		})
 		if err != nil {
 			slog.Error("failed to build adminapi", "err", err)
@@ -326,6 +332,13 @@ func main() {
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/", as.Routes()) // /token, JWKS, RFC 9728 metadata
 	mux.Handle("/mcp/", gw)
+	// The admin UI (issue #17) is served unconditionally when built into
+	// the binary -- no separate feature flag, matching the "ship the
+	// mechanism now" posture the rest of Phase 4 already takes. It's
+	// inert without the admin API actually being enabled: every /admin/*
+	// call the UI makes still goes through the exact same dual-trust (or
+	// cookie) gate below.
+	mux.Handle("/ui/", webui.Handler())
 	if adminAPI != nil {
 		mux.Handle("/admin/", adminAPI.Routes())
 	}
