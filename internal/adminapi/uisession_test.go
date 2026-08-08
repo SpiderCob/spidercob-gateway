@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -182,7 +183,7 @@ func TestDeleteUISession_InvalidatesCookie(t *testing.T) {
 	}
 }
 
-// --- Cookie path is additive on agents/groups/policies, never on nodes ---
+// --- Cookie path is additive on agents/groups/policies/nodes (issue #19: nodes joined the rest in this issue) ---
 
 func TestCookieAuth_ValidCookieAloneSucceedsOnAgents(t *testing.T) {
 	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
@@ -196,15 +197,63 @@ func TestCookieAuth_ValidCookieAloneSucceedsOnAgents(t *testing.T) {
 	}
 }
 
-func TestCookieAuth_ValidCookieAloneRejectedOnNodes(t *testing.T) {
+// --- Cookie path on nodes (issue #19) ---
+
+func TestCookieAuth_ValidCookieAloneSucceedsOnListNodes(t *testing.T) {
 	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
 	loginBody, _ := json.Marshal(createUISessionRequest{SpiderSnoopSessionToken: "human-token"})
 	loginRec := doRawRequest(api, "POST", "/admin/ui/session", loginBody, nil)
 	cookie := sessionCookieFrom(loginRec)
 
 	rec := doRawRequest(api, "GET", "/admin/nodes", nil, cookie)
-	if rec.Code != 401 {
-		t.Fatalf("status = %d, want 401 (nodes stays service-to-service only), body = %s", rec.Code, rec.Body.String())
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (cookie alone now succeeds on nodes, issue #19), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCookieAuth_ValidCookieAloneCanCreateNode(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	loginBody, _ := json.Marshal(createUISessionRequest{SpiderSnoopSessionToken: "human-token"})
+	loginRec := doRawRequest(api, "POST", "/admin/ui/session", loginBody, nil)
+	cookie := sessionCookieFrom(loginRec)
+
+	body, _ := json.Marshal(createNodeRequest{Name: "cookie-created", Transport: "streamable_http", UpstreamURL: "http://a"})
+	rec := doRawRequest(api, "POST", "/admin/nodes", body, cookie)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCookieAuth_ValidCookieAloneCanDeleteAdminSourcedNode(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	if _, err := s.CreateNode(context.Background(), store.Node{Name: "throwaway", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a"), Source: store.NodeSourceAdmin}); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	loginBody, _ := json.Marshal(createUISessionRequest{SpiderSnoopSessionToken: "human-token"})
+	loginRec := doRawRequest(api, "POST", "/admin/ui/session", loginBody, nil)
+	cookie := sessionCookieFrom(loginRec)
+
+	rec := doRawRequest(api, "DELETE", "/admin/nodes/throwaway", nil, cookie)
+	if rec.Code != 204 {
+		t.Fatalf("status = %d, want 204, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCookieAuth_ValidCookieAloneRefusedDeletingConfigSourcedNode(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	if _, err := s.UpsertConfigNode(context.Background(), store.Node{Name: "jira", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a")}); err != nil {
+		t.Fatalf("UpsertConfigNode: %v", err)
+	}
+	loginBody, _ := json.Marshal(createUISessionRequest{SpiderSnoopSessionToken: "human-token"})
+	loginRec := doRawRequest(api, "POST", "/admin/ui/session", loginBody, nil)
+	cookie := sessionCookieFrom(loginRec)
+
+	rec := doRawRequest(api, "DELETE", "/admin/nodes/jira", nil, cookie)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := s.GetNodeByName(context.Background(), "jira"); err != nil {
+		t.Fatalf("config-sourced node must still exist after a refused delete: %v", err)
 	}
 }
 

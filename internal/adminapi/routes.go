@@ -94,10 +94,10 @@ func New(cfg Config) (*AdminAPI, error) {
 // never needed more than that.
 func (a *AdminAPI) Routes() http.Handler {
 	mux := http.NewServeMux()
-	// Agents/groups/policies accept either credential shape (issue #17:
-	// gateBrowserOrService) -- the browser-facing admin UI talks to
-	// exactly these three resource families in its v0. Nodes stay
-	// service-to-service only (a.gate), unchanged from issue #15.
+	// Every resource family the admin UI talks to accepts either
+	// credential shape (issue #17: gateBrowserOrService) -- agents,
+	// groups, and policies from issue #17 itself, nodes joining them in
+	// issue #19.
 	mux.HandleFunc("GET /admin/agents", a.gateBrowserOrService(a.listAgents))
 	mux.HandleFunc("POST /admin/agents", a.gateBrowserOrService(a.createAgent))
 	mux.HandleFunc("DELETE /admin/agents/{client_id}", a.gateBrowserOrService(a.revokeAgent))
@@ -111,9 +111,11 @@ func (a *AdminAPI) Routes() http.Handler {
 	mux.HandleFunc("GET /admin/policies", a.gateBrowserOrService(a.listPolicies))
 	mux.HandleFunc("PUT /admin/policies", a.gateBrowserOrService(a.replacePolicies))
 
-	mux.HandleFunc("GET /admin/nodes", a.gate(a.listNodes))
-	mux.HandleFunc("POST /admin/nodes", a.gate(a.createNode))
-	mux.HandleFunc("DELETE /admin/nodes/{name}", a.gate(a.deleteNode))
+	// Nodes joined agents/groups/policies on the cookie path in issue #19
+	// -- previously service-to-service only (issue #15/#17).
+	mux.HandleFunc("GET /admin/nodes", a.gateBrowserOrService(a.listNodes))
+	mux.HandleFunc("POST /admin/nodes", a.gateBrowserOrService(a.createNode))
+	mux.HandleFunc("DELETE /admin/nodes/{name}", a.gateBrowserOrService(a.deleteNode))
 
 	// UI session lifecycle (issue #17) -- these three are the login/
 	// whoami/logout surface itself, so none of them sit behind either
@@ -168,16 +170,17 @@ func (a *AdminAPI) gate(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // gateBrowserOrService additionally accepts a valid UI session cookie
-// (issue #17) as an alternative to the NHI-token-plus-header pair --
-// strictly additive: the underlying dual-trust gate is completely
-// unmodified and remains the only option for /admin/nodes. A cookie is
-// tried first only if one is actually present; a missing, unknown, or
-// aged-out cookie falls through to the ordinary gate rather than
-// failing immediately -- a stale leftover cookie sitting alongside a
-// still-valid NHI token (a service-to-service caller happens to also
-// carry one) must not become a hard failure, and a request with no
-// cookie at all must see exactly the same errors/status codes gate
-// already produces, unchanged from issue #13/#15.
+// (issue #17; extended to /admin/nodes in issue #19, its last holdout)
+// as an alternative to the NHI-token-plus-header pair -- strictly
+// additive: the underlying dual-trust gate is completely unmodified. A
+// cookie is tried first only if one is actually present; a missing,
+// unknown, or aged-out cookie falls through to the ordinary gate
+// rather than failing immediately -- a stale leftover cookie sitting
+// alongside a still-valid NHI token (a service-to-service caller
+// happens to also carry one) must not become a hard failure, and a
+// request with no cookie at all must see exactly the same
+// errors/status codes gate already produces, unchanged from issue
+// #13/#15.
 func (a *AdminAPI) gateBrowserOrService(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := r.Cookie(UISessionCookieName); err == nil {

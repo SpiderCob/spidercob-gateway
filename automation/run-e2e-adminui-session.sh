@@ -5,10 +5,13 @@
 # in via POST /admin/ui/session using the exact same fake spider-snoop
 # fixture issue #13's e2e already uses, gets a real HttpOnly cookie, and
 # that cookie alone authenticates real /admin/agents, /admin/groups, and
-# /admin/policies calls -- but never /admin/nodes, which stays service-
-# to-service only. Also proves the existing NHI-token-plus-header path
-# (issue #13/#15) is completely unaffected by this addition, and that a
-# UI session actually expires on its own, not just on explicit logout.
+# /admin/policies calls. Also proves the existing NHI-token-plus-header
+# path (issue #13/#15) is completely unaffected by this addition, and
+# that a UI session actually expires on its own, not just on explicit
+# logout. /admin/nodes joined the cookie path in issue #19 -- proving
+# that specific extension is run-e2e-adminui-nodes.sh's job, not this
+# script's; this script only needs to not regress on the resources it
+# already covers.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -154,10 +157,6 @@ check_contains "the cookie-created group is really persisted" "$list_groups_body
 
 policies_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" "${base}/admin/policies")
 check "cookie alone succeeds on /admin/policies" "$policies_status" "200"
-
-echo "==> the cookie is deliberately NOT accepted on /admin/nodes (service-to-service only, issue #15 unchanged)"
-cookie_nodes_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" "${base}/admin/nodes")
-check "cookie alone rejected on /admin/nodes" "$cookie_nodes_status" "401"
 
 echo "==> logout invalidates the cookie"
 logout_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" -X DELETE "${base}/admin/ui/session")

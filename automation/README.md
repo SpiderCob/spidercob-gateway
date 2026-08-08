@@ -106,6 +106,18 @@ instead of going through `make`.
   Requires `internal/webui/dist` to exist (`make web`, or `make ci`/
   `make build`, which both depend on it) — see the note below.
 
+- **`run-e2e-adminui-nodes.sh`** — issue #19's extension of the cookie
+  path onto `/admin/nodes`, against the real compiled binary. Narrowly
+  scoped on purpose: logs in via the browser cookie (no NHI token
+  anywhere in this script), confirms the cookie alone now succeeds on
+  `GET/POST/DELETE /admin/nodes` (previously service-to-service only),
+  registers a real node and confirms it's persisted, confirms deleting
+  a `config`-sourced node via the cookie is refused with the same 409
+  message the NHI path already produces, confirms deleting the
+  cookie-registered node succeeds. Does **not** re-prove restart-
+  required behavior — that stays `run-e2e-nodes.sh`'s job, unmodified.
+  Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user
