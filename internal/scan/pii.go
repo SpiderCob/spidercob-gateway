@@ -102,23 +102,55 @@ func (s *PIIScanner) ScanRequest(body []byte) Verdict {
 	return Verdict{Action: Allow, Scanner: s.Name()}
 }
 
+// ssnRedaction and creditCardRedaction are the structural markers
+// ScanResponse substitutes in, as []byte -- computed once rather than
+// re-allocated per match.
+var (
+	ssnRedaction        = []byte("[REDACTED:ssn]")
+	creditCardRedaction = []byte("[REDACTED:credit-card]")
+)
+
 func (s *PIIScanner) ScanResponse(body []byte) ([]byte, Verdict) {
 	v := Verdict{Action: Allow, Scanner: s.Name()}
 
-	for _, m := range ssnPattern.FindAll(body, -1) {
+	// ReplaceAllFunc operates directly on []byte, the same approach
+	// SecretScanner's ReplaceAll already uses -- flagged by Copilot's
+	// review on PR #12 as a byte-safety concern (converting the whole
+	// body to a Go string and back on every match, the previous
+	// approach here, was claimed to risk corrupting invalid-UTF-8
+	// bytes elsewhere in the body). That specific claim doesn't
+	// actually hold -- a bare string([]byte)/[]byte(string) conversion
+	// in Go is a byte-for-byte reinterpretation with no UTF-8
+	// validation or substitution, verified directly before applying
+	// this change -- but switching to ReplaceAllFunc is still a real
+	// improvement on two fronts the review's summary also named: it's
+	// a single pass instead of re-allocating and re-scanning the
+	// (potentially large) whole body per match, and it now matches
+	// SecretScanner's own pattern instead of diverging from it. Only
+	// the matched substring itself -- already known to be a
+	// digit/hyphen/space shape per the regex -- is ever converted to a
+	// string, for the plausibility/Luhn check.
+	var redactedSSN bool
+	body = ssnPattern.ReplaceAllFunc(body, func(m []byte) []byte {
 		if !ssnPlausible(string(m)) {
-			continue
+			return m
 		}
-		body = []byte(strings.Replace(string(body), string(m), "[REDACTED:ssn]", 1))
+		redactedSSN = true
+		return ssnRedaction
+	})
+	if redactedSSN {
 		v = Verdict{Action: Redact, Scanner: s.Name(), Detail: "ssn"}
 	}
 
-	for _, m := range creditCardPattern.FindAll(body, -1) {
-		digits := digitsOnly(string(m))
-		if !luhnValid(digits) {
-			continue
+	var redactedCard bool
+	body = creditCardPattern.ReplaceAllFunc(body, func(m []byte) []byte {
+		if !luhnValid(digitsOnly(string(m))) {
+			return m
 		}
-		body = []byte(strings.Replace(string(body), string(m), "[REDACTED:credit-card]", 1))
+		redactedCard = true
+		return creditCardRedaction
+	})
+	if redactedCard {
 		v = Verdict{Action: Redact, Scanner: s.Name(), Detail: "credit-card"}
 	}
 

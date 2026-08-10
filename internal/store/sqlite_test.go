@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -635,6 +636,83 @@ func TestDeleteGroup(t *testing.T) {
 	}
 	if _, err := s.GetGroupByName(ctx, "policy-holder"); err != nil {
 		t.Fatalf("group must still exist after a refused delete: %v", err)
+	}
+}
+
+// TestDeleteGroup_ConcurrentPolicyInsertNeverSilentlyCascaded guards
+// the TOCTOU race Copilot's review flagged on PR #14: as three separate
+// statements, a policy could be inserted referencing a group between
+// DeleteGroup's COUNT and its DELETE, and the DELETE would then
+// silently cascade-wipe that just-created policy despite the check
+// existing specifically to prevent that. Hammers both operations
+// concurrently across many freshly-created groups (same style as this
+// package's existing TestExternalIdentityResolveOrCreate_
+// ConcurrentFirstLoginNoDuplicate) so real scheduling jitter has many
+// chances to land the race window the old, non-transactional code
+// left open.
+func TestDeleteGroup_ConcurrentPolicyInsertNeverSilentlyCascaded(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// All pairs are launched up front, not iteration-by-iteration --
+	// with the store's single shared connection (MaxOpenConns(1)),
+	// having many groups' work queued at once means many *other*
+	// groups' statements can land in the gap between one group's COUNT
+	// and its DELETE, which is what actually gives the old,
+	// non-transactional code's race window a realistic chance of being
+	// hit by scheduling alone, rather than relying on luck within an
+	// otherwise-uncontended single pair.
+	const n = 100
+	groups := make([]Group, n)
+	for i := 0; i < n; i++ {
+		g, err := s.CreateGroup(ctx, fmt.Sprintf("race-group-%d", i))
+		if err != nil {
+			t.Fatalf("CreateGroup %d: %v", i, err)
+		}
+		groups[i] = g
+	}
+
+	insertErrs := make([]error, n)
+	deleteErrs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(2 * n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			_, insertErrs[i] = s.db.ExecContext(ctx,
+				`INSERT INTO policies (group_id, node, rule_type) VALUES (?, ?, ?)`, groups[i].ID, "jira", "allow")
+		}()
+		go func() {
+			defer wg.Done()
+			deleteErrs[i] = s.DeleteGroup(ctx, groups[i].Name)
+		}()
+	}
+	wg.Wait()
+
+	// If a raw policy insert reports success, that policy must still
+	// actually exist -- a concurrent DeleteGroup must never have
+	// cascaded it away out from under a caller who was just told their
+	// insert succeeded. foreign_keys(1) is on, so an insert that
+	// actually lands *after* the group is fully gone fails with a
+	// constraint error (insertErr != nil in that ordering) rather than
+	// silently referencing nothing.
+	for i := 0; i < n; i++ {
+		if insertErrs[i] != nil {
+			continue
+		}
+		var count int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM policies WHERE group_id = ?`, groups[i].ID,
+		).Scan(&count); err != nil {
+			t.Fatalf("group %d: count policies: %v", i, err)
+		}
+		if count == 0 {
+			t.Fatalf("group %d: a policy insert reported success but was silently cascaded away by a concurrent DeleteGroup", i)
+		}
+		if deleteErrs[i] == nil {
+			t.Fatalf("group %d: both the policy insert and DeleteGroup reported success -- DeleteGroup should have seen the reference and returned ErrConflict", i)
+		}
 	}
 }
 
