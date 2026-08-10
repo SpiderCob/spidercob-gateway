@@ -9,7 +9,7 @@
 Non-human identities (agents, service accounts) outnumber humans ~100:1 in most orgs, and most MCP deployments today run on anonymous static API keys. Spidercob Gateway sits in front of your internal MCP servers and gives every request a real identity chain (human `sub` + agent `act`), group-based policy, and bidirectional content inspection (secret/DLP redaction outbound, injection heuristics both ways).
 
 - **Spec-correct:** implements the resource side of [ID-JAG](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-identity-assertion-authz-grant) / MCP Enterprise-Managed Authorization — works with Okta, Entra, Keycloak. No IdP? The embedded identity mode has you covered.
-- **Small-team-shaped:** `docker compose up`, point `config.json` at a CSV of users, check boxes in the admin UI. Target: protected MCPs in 15 minutes.
+- **Small-team-shaped:** `docker compose up`, point `config.json` at a CSV of users and your policy rules. Target: protected MCPs in 15 minutes.
 - **Security data path:** outbound secret/PII redaction (Luhn-checked cards, plausibility-filtered SSNs, entropy-based unknown-secret detection), response-embedded injection detection (homoglyph/zero-width evasion resistant), inbound schema enforcement against each tool's pinned `inputSchema`, tool pinning (TOFU + background drift detection), hash-chained audit (real for admin actions today, per-MCP-request coverage still planned).
 
 ## Quickstart (current skeleton)
@@ -71,7 +71,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 3b: tool pinning (TOFU + background drift detection, rug-pull defense)
 - [x] Phase 3c: scan upgrades (schema enforcement, entropy, PII, homoglyph) — **Phase 3 complete**
 - [x] Phase 4a: `internal/adminapi` v0 — HTTP admin API (agents/groups/policies), spider-snoop-integrated auth
-- [x] Phase 4b: node registration — `POST/GET/DELETE /admin/nodes`, persisted, config-sourced nodes win on conflict, restart-required (no hot-reload), proven via a real process-restart e2e
+- [x] Phase 4b: node registration — `POST/GET/DELETE /admin/nodes`, persisted, a name collision between a config-sourced and admin-sourced node is rejected (not silently overwritten either way), restart-required (no hot-reload), proven via a real process-restart e2e
 - [x] Phase 4c-1: admin UI v0 — agents/groups/policies from a browser (React+Vite, `go:embed`), a new cookie-based session additive to the existing NHI-token API, sign-in via your existing spider-snoop session
 - [x] Phase 4c-2: admin UI node-registration screen — cookie session widened to `/admin/nodes`, transport-conditional create form, explicit restart-required notice
 - [x] Phase 4c-3: CSV bulk user import — `config.json`'s `seed_users_csv_path`, idempotent (create-if-missing, never resets an existing password), for standalone (no spider-snoop) deployments

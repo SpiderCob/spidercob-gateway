@@ -117,7 +117,7 @@ func TestEvaluator_AgentGrantedViaAgentGroupPolicy(t *testing.T) {
 	}
 }
 
-func TestEvaluator_RevokedRateLimitReturns429Shape(t *testing.T) {
+func TestEvaluator_ExceededRateLimitReturns429Shape(t *testing.T) {
 	ev, s := newTestEvaluator(t)
 	ctx := context.Background()
 
