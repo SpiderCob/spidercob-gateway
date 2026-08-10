@@ -3,7 +3,6 @@ package policy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -65,7 +64,11 @@ func (e *Evaluator) principalGroupIDs(ctx context.Context, principal string) ([]
 		}
 		return groupIDs(groups), nil
 	default:
-		return nil, fmt.Errorf("policy: unrecognized principal shape %q", principal)
+		// Matches the lookup-miss case above: no separate error path,
+		// just "no groups" -- evaluate() already turns that into
+		// default-deny, so an unrecognized shape stays fail-static
+		// without generating its own noisy error handling.
+		return nil, nil
 	}
 }
 

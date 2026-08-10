@@ -66,19 +66,20 @@ func (r *Registry) Create(humanToken string) (Session, error) {
 // Get returns the session for token if it exists and hasn't aged past
 // the registry's maxAge. An aged-out session is treated identically to
 // a missing one -- fail-static, never resurrect a decision from a
-// stale lookup -- but is not proactively swept from the map here; a
-// long-idle registry accumulating aged-out entries is an acceptable v0
-// memory cost (session volume is bounded by admin headcount, not
-// request volume) rather than adding a background reaper for this
-// issue.
+// stale lookup -- and is deleted from the map right here on discovery,
+// so a session nobody ever looks up again after expiry doesn't linger
+// forever, without needing a background reaper: repeated logins or
+// scripted use during testing won't accumulate junk entries just by
+// being looked up past their expiry.
 func (r *Registry) Get(token string) (Session, bool) {
 	r.mu.Lock()
 	s, ok := r.sessions[token]
+	if ok && !Valid(s, r.clock(), r.maxAge) {
+		delete(r.sessions, token)
+		ok = false
+	}
 	r.mu.Unlock()
 	if !ok {
-		return Session{}, false
-	}
-	if !Valid(s, r.clock(), r.maxAge) {
 		return Session{}, false
 	}
 	return s, true

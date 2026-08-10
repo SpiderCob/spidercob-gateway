@@ -115,6 +115,42 @@ func TestEvaluate_RateLimitTakesTheMostRestrictiveMatchingAllow(t *testing.T) {
 	}
 }
 
+func TestEvaluate_RateLimitComparesEffectiveRateNotJustMaxCalls(t *testing.T) {
+	// Regression test: picking the smallest max_calls alone is wrong when
+	// windows differ. 10/hour is far stricter overall than 2/sec, even
+	// though 10 > 2 -- "most restrictive" has to mean the lower effective
+	// rate (calls/window), not the smaller raw number.
+	tenPerHour, hour := 10, 3600
+	twoPerSec, sec := 2, 1
+	policies := []store.Policy{
+		{Node: "jira", RuleType: store.PolicyAllow, RateLimitMaxCalls: &tenPerHour, RateLimitWindowSeconds: &hour},
+		{Node: "jira", RuleType: store.PolicyAllow, RateLimitMaxCalls: &twoPerSec, RateLimitWindowSeconds: &sec},
+	}
+	got := evaluate(policies, "tools/call", "search_issues")
+	if got.RateLimitMaxCalls == nil || *got.RateLimitMaxCalls != 10 {
+		t.Fatalf("RateLimitMaxCalls = %v, want the truly more restrictive 10 (10/hour beats 2/sec)", got.RateLimitMaxCalls)
+	}
+	if got.RateLimitWindowSeconds == nil || *got.RateLimitWindowSeconds != 3600 {
+		t.Fatalf("RateLimitWindowSeconds = %v, want 3600", got.RateLimitWindowSeconds)
+	}
+}
+
+func TestEvaluate_RateLimitTieBreaksOnMaxCallsWhenEffectiveRateEqual(t *testing.T) {
+	// 1/60s and 10/600s have identical average rate but very different
+	// burst allowances -- 1/60s permits far less burst, so it must win
+	// the tie-break even though 10 > 1.
+	onePerMinute, minute := 1, 60
+	tenPerTenMinutes, tenMinutes := 10, 600
+	policies := []store.Policy{
+		{Node: "jira", RuleType: store.PolicyAllow, RateLimitMaxCalls: &tenPerTenMinutes, RateLimitWindowSeconds: &tenMinutes},
+		{Node: "jira", RuleType: store.PolicyAllow, RateLimitMaxCalls: &onePerMinute, RateLimitWindowSeconds: &minute},
+	}
+	got := evaluate(policies, "tools/call", "search_issues")
+	if got.RateLimitMaxCalls == nil || *got.RateLimitMaxCalls != 1 {
+		t.Fatalf("RateLimitMaxCalls = %v, want the smaller-burst 1 to win the tie-break on equal effective rate", got.RateLimitMaxCalls)
+	}
+}
+
 func TestEvaluate_NodeScopingIsCallerResponsibility(t *testing.T) {
 	// evaluate itself doesn't filter by node -- PoliciesForGroups already
 	// scopes the query by node before evaluate ever sees the rules. This

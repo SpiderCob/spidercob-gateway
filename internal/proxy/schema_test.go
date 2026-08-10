@@ -57,6 +57,13 @@ func TestGateway_SchemaInvalidCallRejected(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "pinned schema") {
 		t.Fatalf("rejection reason should be distinguishable as a schema violation, got: %s", rec.Body.String())
 	}
+	// Regression test: the gateway's own wrapper text used to prepend
+	// "...pinned schema" on top of ValidateArguments' error, which
+	// already carries its own "...pinned schema" wording -- producing a
+	// duplicated, awkward message.
+	if n := strings.Count(rec.Body.String(), "pinned schema"); n != 1 {
+		t.Fatalf("expected \"pinned schema\" to appear exactly once (not duplicated), got %d times: %s", n, rec.Body.String())
+	}
 }
 
 func TestGateway_SchemaEnforcement_WrongArgumentTypeRejected(t *testing.T) {

@@ -32,19 +32,44 @@ export default function Nodes() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
-    if (!draft.name.trim()) return
-    if (draft.transport === 'streamable_http' && !draft.upstream_url?.trim()) {
+    const name = draft.name.trim()
+    if (!name) return
+    const upstreamUrl = draft.upstream_url?.trim()
+    const command = draft.command?.trim()
+    if (draft.transport === 'streamable_http' && !upstreamUrl) {
       setError('streamable_http nodes need an upstream URL')
       return
     }
-    if (draft.transport === 'stdio' && !draft.command?.trim()) {
+    if (draft.transport === 'stdio' && !command) {
       setError('stdio nodes need a command')
       return
     }
+    // Send a trimmed, transport-scoped payload rather than the raw draft:
+    // draft.name passing this function's own non-empty check doesn't mean
+    // it's free of leading/trailing whitespace (the backend's
+    // config.ValidateNode rejects that), and switching transports in the
+    // form leaves the *other* transport's now-irrelevant fields
+    // (upstream_url on a stdio node, or command/args on a streamable_http
+    // one) sitting in draft state -- they must not get persisted.
+    const payload: CreateNodeInput =
+      draft.transport === 'streamable_http'
+        ? {
+            name,
+            transport: 'streamable_http',
+            upstream_url: upstreamUrl,
+            pin_refresh_interval_seconds: draft.pin_refresh_interval_seconds,
+          }
+        : {
+            name,
+            transport: 'stdio',
+            command,
+            args: draft.args,
+            pin_refresh_interval_seconds: draft.pin_refresh_interval_seconds,
+          }
     setCreating(true)
     setError(null)
     try {
-      const created = await createNode(draft)
+      const created = await createNode(payload)
       setJustRegistered(created.name)
       setDraft(emptyDraft())
       await refresh()
@@ -156,7 +181,15 @@ export default function Nodes() {
           <tbody>
             {nodes.map((n) => (
               <tr key={n.name}>
-                <td>{n.name}</td>
+                <td>
+                  {n.name}
+                  {justRegistered === n.name && (
+                    <span className="restart-badge" title="Not yet reachable -- restart the gateway">
+                      {' '}
+                      (restart required)
+                    </span>
+                  )}
+                </td>
                 <td>{n.transport}</td>
                 <td>{n.upstream_url ?? [n.command, ...(n.args ?? [])].filter(Boolean).join(' ')}</td>
                 <td>{n.source}</td>

@@ -310,7 +310,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if exists && schema != nil {
 			if err := pin.ValidateArguments(schema, jsonRPCToolArguments(body)); err != nil {
-				writeJSONRPCError(sr, body, "tool call arguments do not match the pinned schema: "+err.Error())
+				// err.Error() already self-describes its specific failure
+				// mode (e.g. "arguments do not match pinned schema: ...",
+				// or a schema parse/resolve failure) -- don't prepend
+				// another "...pinned schema" wrapper on top of it.
+				writeJSONRPCError(sr, body, "tool call rejected: "+err.Error())
 				return
 			}
 		}
