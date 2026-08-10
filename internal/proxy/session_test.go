@@ -105,6 +105,236 @@ func TestSessionManager_EndIsIdempotent(t *testing.T) {
 	}
 }
 
+// blockingUpstream is a sessionUpstream whose teardown() blocks until
+// release is closed, signaling on started (buffered, so a single send never
+// blocks) the moment it begins. Used to make the timing of removal-from-map
+// vs. teardown-completion observable instead of racy.
+type blockingUpstream struct {
+	release  chan struct{}
+	started  chan struct{}
+	tornDown bool
+}
+
+func newBlockingUpstream(release chan struct{}) *blockingUpstream {
+	return &blockingUpstream{release: release, started: make(chan struct{}, 1)}
+}
+
+func (u *blockingUpstream) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (u *blockingUpstream) alive() bool                                  { return true }
+
+func (u *blockingUpstream) teardown(context.Context) error {
+	select {
+	case u.started <- struct{}{}:
+	default:
+	}
+	<-u.release
+	u.tornDown = true
+	return nil
+}
+
+func TestSessionManager_ReapIdle_RemovesAllExpiredFromMapBeforeAnyTeardownRuns(t *testing.T) {
+	// Regression test: reapIdle used to select expired sessions into a
+	// list under one lock, then unlock and tear each down one at a time
+	// via a fresh end() call per session. That meant an already-expired
+	// session's removal from the map could be delayed behind an unrelated
+	// sibling session's slow teardown -- a caller could keep "finding" and
+	// using a session that had already been decided to be reaped. The fix
+	// selects *and removes* every expired session from the map in one
+	// atomic pass, then tears each down afterward, outside the lock.
+	m := newSessionManager(10 * time.Millisecond)
+
+	release := make(chan struct{})
+	up1 := newBlockingUpstream(release)
+	up2 := newBlockingUpstream(release)
+	s1, err := m.create("jira", up1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	s2, err := m.create("jira", up2)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond) // both now idle-expired
+
+	done := make(chan struct{})
+	go func() {
+		m.reapIdle(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-up1.started:
+	case <-up2.started:
+	case <-time.After(time.Second):
+		t.Fatal("neither teardown started in time")
+	}
+
+	// Both sessions must already be gone from the map -- neither's removal
+	// should wait behind the other's still-blocked teardown.
+	if _, ok := m.get(s1.id); ok {
+		t.Fatal("expected s1 to already be removed from the map")
+	}
+	if _, ok := m.get(s2.id); ok {
+		t.Fatal("expected s2 to already be removed from the map")
+	}
+
+	close(release)
+	<-done
+	if !up1.tornDown || !up2.tornDown {
+		t.Fatal("expected both sessions to eventually be torn down")
+	}
+}
+
+// failThenSucceedUpstream fails its first teardown() call and succeeds on
+// the next, simulating a transient failure (e.g. a signal that didn't land,
+// a momentarily-unreachable upstream).
+type failThenSucceedUpstream struct {
+	fail     bool
+	calls    int
+	tornDown bool
+}
+
+func (u *failThenSucceedUpstream) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (u *failThenSucceedUpstream) alive() bool                                  { return true }
+
+func (u *failThenSucceedUpstream) teardown(context.Context) error {
+	u.calls++
+	if u.fail {
+		u.fail = false
+		return errors.New("transient teardown failure")
+	}
+	u.tornDown = true
+	return nil
+}
+
+func TestSessionManager_EndIsRetryableAfterTeardownFailure(t *testing.T) {
+	// Regression test: end() used to delete the session mapping *before*
+	// calling teardown(). If teardown failed, the mapping was already
+	// gone, so a retry had nothing left to act on and the upstream (e.g. a
+	// stdio child process) could leak with no way to reach it again.
+	m := newSessionManager(time.Hour)
+	up := &failThenSucceedUpstream{fail: true}
+	s, err := m.create("jira", up)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := m.end(context.Background(), s.id); err == nil {
+		t.Fatal("expected the first end() to surface the teardown failure")
+	}
+	if up.calls != 1 {
+		t.Fatalf("expected exactly one teardown attempt so far, got %d", up.calls)
+	}
+
+	// A session mid-teardown (even a failed attempt) must not be usable as
+	// a normal live session -- it must not be mistaken for a fresh one.
+	if _, ok := m.get(s.id); ok {
+		t.Fatal("a session that failed to tear down must not be usable as a live session")
+	}
+
+	if err := m.end(context.Background(), s.id); err != nil {
+		t.Fatalf("retry end: %v", err)
+	}
+	if up.calls != 2 {
+		t.Fatalf("expected teardown to be retried, got %d calls", up.calls)
+	}
+	if !up.tornDown {
+		t.Fatal("expected the retry to succeed")
+	}
+	if _, ok := m.get(s.id); ok {
+		t.Fatal("expected the session to be gone after the retry succeeds")
+	}
+}
+
+// deadUpstream simulates a resource that's already gone on its own (e.g. a
+// stdio child process that already exited) -- teardown() still surfaces an
+// error (its historical exit status), but alive() correctly reports false.
+type deadUpstream struct {
+	teardownCalls int
+	teardownErr   error
+}
+
+func (u *deadUpstream) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (u *deadUpstream) alive() bool                                  { return false }
+
+func (u *deadUpstream) teardown(context.Context) error {
+	u.teardownCalls++
+	return u.teardownErr
+}
+
+func TestSessionManager_EndCompletesWhenUpstreamConfirmsAlreadyGone(t *testing.T) {
+	// Regression test: requiring teardown() to succeed before removing the
+	// mapping (added to fix the leak-on-failure bug) must not get an
+	// already-dead upstream permanently stuck -- e.g. a crashed stdio
+	// process whose Close() surfaces its exit code as an "error" forever,
+	// even though there's nothing left to clean up. alive()==false is the
+	// authoritative "nothing is being leaked" signal, independent of
+	// whatever teardown() itself returns.
+	m := newSessionManager(time.Hour)
+	up := &deadUpstream{teardownErr: errors.New("exit status 1")}
+	s, err := m.create("crash", up)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := m.end(context.Background(), s.id); err != nil {
+		t.Fatalf("end: expected no error for a confirmed-dead upstream, got %v", err)
+	}
+	if _, ok := m.get(s.id); ok {
+		t.Fatal("expected the session to be gone after end")
+	}
+}
+
+// stuckUpstream always fails to tear down while still reporting itself
+// alive -- a genuine "kill signal didn't land" scenario.
+type stuckUpstream struct {
+	teardownCalls int
+	failUntilCall int
+}
+
+func (u *stuckUpstream) ServeHTTP(http.ResponseWriter, *http.Request) {}
+func (u *stuckUpstream) alive() bool                                  { return true }
+
+func (u *stuckUpstream) teardown(context.Context) error {
+	u.teardownCalls++
+	if u.teardownCalls <= u.failUntilCall {
+		return errors.New("still running, kill signal ignored")
+	}
+	return nil
+}
+
+func TestSessionManager_ReapIdleRequeuesStillAliveSessionOnTeardownFailure(t *testing.T) {
+	// A session that's genuinely still alive despite a failed reap
+	// attempt must not just vanish from bookkeeping -- it has to stay
+	// reachable for a retry (next reapIdle pass, or an explicit end()).
+	m := newSessionManager(10 * time.Millisecond)
+	up := &stuckUpstream{failUntilCall: 1}
+	s, err := m.create("jira", up)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	m.reapIdle(context.Background())
+
+	if up.teardownCalls != 1 {
+		t.Fatalf("expected exactly one teardown attempt, got %d", up.teardownCalls)
+	}
+	if _, ok := m.get(s.id); ok {
+		t.Fatal("a session that failed to tear down must not be usable as a live session")
+	}
+
+	// Retry via an explicit end() call -- must actually reach the upstream
+	// again, not report "not found" for a session that's still pending.
+	if err := m.end(context.Background(), s.id); err != nil {
+		t.Fatalf("retry end: %v", err)
+	}
+	if up.teardownCalls != 2 {
+		t.Fatalf("expected teardown to be retried, got %d calls", up.teardownCalls)
+	}
+}
+
 func TestSessionManager_ReapIdleRemovesOnlyExpiredSessions(t *testing.T) {
 	m := newSessionManager(10 * time.Millisecond)
 	staleUp := &fakeUpstream{}

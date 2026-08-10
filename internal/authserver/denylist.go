@@ -71,6 +71,15 @@ func (d *denylist) tryConsume(ctx context.Context, jti string, expiresAt time.Ti
 	d.jtis[jti] = expiresAt
 	d.mu.Unlock()
 	if err := d.store.RevokeJTI(ctx, jti, expiresAt); err != nil {
+		// Persistence failed, so this attempt never actually claimed jti --
+		// roll back the in-memory mark. Otherwise a client retry after a
+		// transient store error would be wrongly treated as a replay
+		// (fresh=false) instead of hitting another server_error.
+		d.mu.Lock()
+		if got, ok := d.jtis[jti]; ok && got == expiresAt {
+			delete(d.jtis, jti)
+		}
+		d.mu.Unlock()
 		return true, err
 	}
 	return true, nil

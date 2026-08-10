@@ -60,6 +60,12 @@ func verifySecret(plaintext, encoded string) (bool, error) {
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
 		return false, errMalformedHash
 	}
+	if version != argon2.Version {
+		// A self-describing format that doesn't check its own version tag
+		// isn't actually self-describing -- don't silently accept a hash
+		// claiming a version this code doesn't actually implement.
+		return false, errMalformedHash
+	}
 	var memory, t uint32
 	var p uint8
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &t, &p); err != nil {

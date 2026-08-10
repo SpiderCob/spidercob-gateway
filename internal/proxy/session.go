@@ -42,6 +42,20 @@ type mcpSession struct {
 
 	mu         sync.Mutex
 	lastActive time.Time
+	// ending is set the moment end() begins tearing this session down --
+	// including a failed attempt -- so get() stops handing it out even
+	// before teardown actually finishes. A request bearing this session ID
+	// must never be mistaken for a live one just because teardown hasn't
+	// completed (or failed and is awaiting retry) yet.
+	ending bool
+
+	// teardownMu serializes teardown attempts for this session (an
+	// explicit end() call racing a reapIdle pass, or a retried end() after
+	// a failure) so upstream.teardown() is never invoked concurrently for
+	// the same session, and teardownDone prevents calling it again once it
+	// has actually succeeded.
+	teardownMu   sync.Mutex
+	teardownDone bool
 }
 
 func (s *mcpSession) touch() {
@@ -90,9 +104,20 @@ func (m *sessionManager) create(node string, upstream sessionUpstream) (*mcpSess
 
 func (m *sessionManager) get(id string) (*mcpSession, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s, ok := m.sessions[id]
-	return s, ok
+	m.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	s.mu.Lock()
+	ending := s.ending
+	s.mu.Unlock()
+	if ending {
+		// Already being (or having failed to be) torn down -- never hand
+		// this back out as if it were still a live, usable session.
+		return nil, false
+	}
+	return s, true
 }
 
 func (m *sessionManager) touch(id string) {
@@ -117,34 +142,92 @@ func (m *sessionManager) allIDs() []string {
 // Ending an already-gone session (already ended, or reaped for idleness)
 // is rejected, not silently treated as a no-op -- a request bearing a
 // dead session ID must never be mistaken for a fresh one.
+//
+// The mapping is only removed once the upstream is confirmed gone. If
+// teardown fails AND the upstream still reports itself alive, the session
+// stays in the map (still marked ending, so get() keeps refusing it)
+// specifically so a caller -- an explicit DELETE retry, or the next
+// reapIdle pass -- can call end() again and actually finish tearing it
+// down, instead of the mapping vanishing and leaking the underlying
+// resource (notably a stdio child process) with no way left to reach it.
+// A teardown error alongside alive()==false isn't treated as a leak (e.g.
+// a stdio process that already exited on its own can surface its
+// historical exit code from Close() even though there's nothing left to
+// clean up) -- there's nothing to retry, so the mapping is removed anyway.
 func (m *sessionManager) end(ctx context.Context, id string) error {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
-	if ok {
-		delete(m.sessions, id)
-	}
 	m.mu.Unlock()
 	if !ok {
 		return errSessionNotFound
 	}
-	return s.upstream.teardown(ctx)
+
+	s.mu.Lock()
+	s.ending = true
+	s.mu.Unlock()
+
+	// Serializes concurrent/retried end() calls for this exact session so
+	// upstream.teardown() is never in flight twice at once, and so a call
+	// that arrives just after a concurrent success doesn't call it again.
+	s.teardownMu.Lock()
+	defer s.teardownMu.Unlock()
+	if s.teardownDone {
+		return nil
+	}
+	if err := s.upstream.teardown(ctx); err != nil && s.upstream.alive() {
+		return err
+	}
+	s.teardownDone = true
+
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	return nil
 }
 
 // reapIdle tears down every session whose idle timeout has elapsed. Meant
 // to be called periodically by the gateway.
+//
+// Selection *and* removal from the map happen together in one locked pass
+// so an already-expired session's removal can never be delayed behind a
+// sibling session's slow teardown -- teardown itself runs afterward,
+// outside the lock, where it can't block new sessions being created or
+// looked up.
 func (m *sessionManager) reapIdle(ctx context.Context) {
 	now := time.Now()
+
 	m.mu.Lock()
-	var expired []string
+	var expired []*mcpSession
 	for id, s := range m.sessions {
 		if now.Sub(s.idleSince()) >= m.idleTimeout {
-			expired = append(expired, id)
+			delete(m.sessions, id)
+			expired = append(expired, s)
 		}
 	}
 	m.mu.Unlock()
 
-	for _, id := range expired {
-		_ = m.end(ctx, id) // best-effort; a session ended concurrently is fine
+	for _, s := range expired {
+		s.mu.Lock()
+		s.ending = true
+		s.mu.Unlock()
+
+		s.teardownMu.Lock()
+		if !s.teardownDone {
+			if err := s.upstream.teardown(ctx); err != nil && s.upstream.alive() {
+				// Still genuinely alive despite the failed attempt -- put
+				// the mapping back (still marked ending, so it can't be
+				// reused as a live session in the meantime) so a future
+				// reapIdle pass or an explicit end() can retry, instead of
+				// silently leaking it now that it's off this loop's list.
+				s.teardownMu.Unlock()
+				m.mu.Lock()
+				m.sessions[s.id] = s
+				m.mu.Unlock()
+				continue
+			}
+			s.teardownDone = true
+		}
+		s.teardownMu.Unlock()
 	}
 }
 

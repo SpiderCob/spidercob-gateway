@@ -32,10 +32,23 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+// sqliteURIPath escapes a filesystem path for use as the path component of
+// a SQLite "file:" URI DSN. SQLite's URI-filename syntax treats a literal
+// '?' as introducing the query string and '#' as introducing a fragment
+// (see SQLite docs, "URI Filenames"); an unescaped path containing either
+// would be truncated there, silently opening the wrong file, and lets the
+// remainder of the path be interpreted as (and inject) extra
+// pragmas/query parameters. '%' is escaped first so its own encoding
+// round-trips correctly.
+func sqliteURIPath(path string) string {
+	r := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
+	return r.Replace(path)
+}
+
 // Open creates (if needed) the SQLite file at path, applies every
 // not-yet-applied migration, and returns a ready Store.
 func Open(path string) (*SQLiteStore, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", sqliteURIPath(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -391,7 +404,7 @@ func (s *SQLiteStore) RevokeJTI(ctx context.Context, jti string, expiresAt time.
 func (s *SQLiteStore) IsRevoked(ctx context.Context, jti string) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM revocations WHERE jti = ?`, jti).Scan(&count)
+		`SELECT COUNT(*) FROM revocations WHERE jti = ? AND expires_at > ?`, jti, time.Now()).Scan(&count)
 	return count > 0, err
 }
 

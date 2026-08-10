@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -19,6 +20,25 @@ func openTestStore(t *testing.T) *SQLiteStore {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestOpenHandlesPathsWithURIMetacharacters(t *testing.T) {
+	// '?' and '#' are meaningful in SQLite's "file:" URI DSN syntax --
+	// unescaped, they truncate the path (everything after becomes a bogus
+	// query string / fragment) instead of naming the actual file, and can
+	// let a crafted path inject extra pragmas/query params.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "weird?name#1.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected sqlite to create the file at the exact requested path %q, got: %v", path, err)
+	}
 }
 
 func TestOpenAppliesMigrationsAndIsIdempotent(t *testing.T) {
@@ -809,6 +829,16 @@ func TestRevocationLifecycle(t *testing.T) {
 	}
 	if len(revs) != 1 || revs[0].JTI != "jti-1" {
 		t.Fatalf("LoadRevocations = %+v, want only jti-1", revs)
+	}
+
+	// IsRevoked must agree with LoadRevocations: an expired revocation row
+	// is not a live revocation anymore, even though the row still exists.
+	revoked, err = s.IsRevoked(ctx, "jti-expired")
+	if err != nil {
+		t.Fatalf("IsRevoked (expired): %v", err)
+	}
+	if revoked {
+		t.Fatalf("jti-expired's revocation is in the past and must not report as revoked")
 	}
 }
 
