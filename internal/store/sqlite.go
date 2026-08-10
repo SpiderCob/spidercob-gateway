@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	_ "modernc.org/sqlite" // registers the "sqlite" driver, no cgo
 )
 
@@ -679,6 +680,90 @@ func unmarshalNodeArgs(argsJSON *string, n *Node) error {
 		return fmt.Errorf("unmarshal args for node %s: %w", n.Name, err)
 	}
 	return nil
+}
+
+// AppendAuditRecord persists rec as the new last entry in the
+// hash-chained audit log (issue #23). The read-last-hash-then-insert
+// happens inside one transaction -- the same atomicity precedent
+// ResolveOrCreateExternalUser already established -- so concurrent
+// appends can never race each other into computing the same prevHash
+// for two different rows.
+func (s *SQLiteStore) AppendAuditRecord(ctx context.Context, rec audit.Record) (AuditLogEntry, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AuditLogEntry{}, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op if already committed
+
+	prevHash := audit.GenesisPrevHash
+	var lastHash string
+	err = tx.QueryRowContext(ctx, `SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1`).Scan(&lastHash)
+	switch {
+	case err == nil:
+		prevHash = lastHash
+	case errors.Is(err, sql.ErrNoRows):
+		// Table is empty -- prevHash stays the genesis sentinel.
+	default:
+		return AuditLogEntry{}, err
+	}
+
+	hash, err := audit.Hash(prevHash, rec)
+	if err != nil {
+		return AuditLogEntry{}, err
+	}
+
+	var actorNHISubject any
+	if rec.ActorNHISubject != "" {
+		actorNHISubject = rec.ActorNHISubject
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_log (ts, actor_nhi_subject, actor_human_username, actor_human_role, action, resource, prev_hash, hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.Timestamp, actorNHISubject, rec.ActorHumanUsername, rec.ActorHumanRole, rec.Action, rec.Resource, prevHash, hash)
+	if err != nil {
+		return AuditLogEntry{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return AuditLogEntry{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuditLogEntry{}, err
+	}
+
+	return AuditLogEntry{
+		ID: id,
+		StoredRecord: audit.StoredRecord{
+			Record:   rec,
+			PrevHash: prevHash,
+			Hash:     hash,
+		},
+	}, nil
+}
+
+// ListAuditRecords returns every audit_log row in chain order
+// (ascending id).
+func (s *SQLiteStore) ListAuditRecords(ctx context.Context) ([]AuditLogEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, ts, actor_nhi_subject, actor_human_username, actor_human_role, action, resource, prev_hash, hash
+		 FROM audit_log ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []AuditLogEntry
+	for rows.Next() {
+		var e AuditLogEntry
+		var actorNHISubject sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &actorNHISubject, &e.ActorHumanUsername,
+			&e.ActorHumanRole, &e.Action, &e.Resource, &e.PrevHash, &e.Hash); err != nil {
+			return nil, err
+		}
+		e.ActorNHISubject = actorNHISubject.String
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }
 
 // isUniqueConstraint reports whether err came from a UNIQUE constraint

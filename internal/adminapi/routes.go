@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
@@ -205,13 +206,34 @@ func bearerToken(r *http.Request) (string, bool) {
 // logAdminAction records every successful admin mutation with both
 // halves of the request's identity (story 22) -- a queryable trail even
 // before internal/audit exists.
-func logAdminAction(r *http.Request, action, resource string) {
+// logAdminAction records every successful admin mutation with both
+// halves of the request's identity (story 22) -- a live slog line as
+// before, plus (issue #23) a real, persisted, hash-chained
+// audit_log row via store.AppendAuditRecord. A store failure here is
+// logged but deliberately never fails the request: the mutation
+// already succeeded, and a failure to additionally audit-log it
+// shouldn't roll back or 500 an otherwise-successful operation (the
+// same posture a logging failure anywhere else in this codebase
+// already takes).
+func (a *AdminAPI) logAdminAction(r *http.Request, action, resource string) {
 	ident, _ := r.Context().Value(adminIdentityCtxKey{}).(adminIdentity)
 	slog.Info("admin action",
 		"nhi_subject", ident.nhiSubject,
 		"admin_username", ident.humanUsername,
 		"admin_role", ident.humanRole,
 		"action", action, "resource", resource)
+
+	rec := audit.Record{
+		Timestamp:          time.Now(),
+		ActorNHISubject:    ident.nhiSubject,
+		ActorHumanUsername: ident.humanUsername,
+		ActorHumanRole:     ident.humanRole,
+		Action:             action,
+		Resource:           resource,
+	}
+	if _, err := a.store.AppendAuditRecord(r.Context(), rec); err != nil {
+		slog.Error("failed to append audit record", "action", action, "resource", resource, "err", err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -284,7 +306,7 @@ func (a *AdminAPI) createAgent(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to create agent")
 		return
 	}
-	logAdminAction(r, "create_agent", agent.ClientID)
+	a.logAdminAction(r, "create_agent", agent.ClientID)
 	writeJSON(w, http.StatusCreated, createAgentResponse{ClientID: agent.ClientID, Secret: secret, Name: agent.Name})
 }
 
@@ -298,7 +320,7 @@ func (a *AdminAPI) revokeAgent(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to revoke agent")
 		return
 	}
-	logAdminAction(r, "revoke_agent", clientID)
+	a.logAdminAction(r, "revoke_agent", clientID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -340,7 +362,7 @@ func (a *AdminAPI) createGroup(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to create group")
 		return
 	}
-	logAdminAction(r, "create_group", g.Name)
+	a.logAdminAction(r, "create_group", g.Name)
 	writeJSON(w, http.StatusCreated, groupResponse{Name: g.Name})
 }
 
@@ -357,7 +379,7 @@ func (a *AdminAPI) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	logAdminAction(r, "delete_group", name)
+	a.logAdminAction(r, "delete_group", name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -415,7 +437,7 @@ func (a *AdminAPI) addGroupMember(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to assign group membership")
 		return
 	}
-	logAdminAction(r, "add_group_member", fmt.Sprintf("%s:%s:%s", groupName, req.Type, req.Identifier))
+	a.logAdminAction(r, "add_group_member", fmt.Sprintf("%s:%s:%s", groupName, req.Type, req.Identifier))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -444,7 +466,7 @@ func (a *AdminAPI) removeGroupMember(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to remove group membership")
 		return
 	}
-	logAdminAction(r, "remove_group_member", fmt.Sprintf("%s:%s:%s", groupName, memberType, identifier))
+	a.logAdminAction(r, "remove_group_member", fmt.Sprintf("%s:%s:%s", groupName, memberType, identifier))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -539,7 +561,7 @@ func (a *AdminAPI) replacePolicies(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to replace policies")
 		return
 	}
-	logAdminAction(r, "replace_policies", fmt.Sprintf("%d rules", len(newPolicies)))
+	a.logAdminAction(r, "replace_policies", fmt.Sprintf("%d rules", len(newPolicies)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -630,7 +652,7 @@ func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to create node")
 		return
 	}
-	logAdminAction(r, "create_node", created.Name)
+	a.logAdminAction(r, "create_node", created.Name)
 	writeJSON(w, http.StatusCreated, toNodeResponse(created))
 }
 
@@ -656,6 +678,6 @@ func (a *AdminAPI) deleteNode(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to delete node")
 		return
 	}
-	logAdminAction(r, "delete_node", name)
+	a.logAdminAction(r, "delete_node", name)
 	w.WriteHeader(http.StatusNoContent)
 }

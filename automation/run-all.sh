@@ -27,3 +27,5 @@ echo
 "$script_dir/run-e2e-adminui-nodes.sh"
 echo
 "$script_dir/run-e2e-seed-users.sh"
+echo
+"$script_dir/run-e2e-audit.sh"
