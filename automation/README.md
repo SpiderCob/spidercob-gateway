@@ -133,15 +133,22 @@ instead of going through `make`.
   existing user's password on a later run. Not part of
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
-- **`run-e2e-audit.sh`** — issue #23's hash-chained audit trail
-  (Phase 4c-4), against the real compiled binary: a rejected,
-  unauthenticated request first (must leave no record), then three
-  real admin operations through the full dual-trust gate. Since no
-  HTTP endpoint exposes audit records yet, this opens the actual
-  `store_db_path` file directly via a real fixture program
-  (`internal/audit/testdata/verifychain`) to confirm exactly three
-  chained records exist and the chain verifies cleanly. Then, the real
-  tamper-evidence proof — not just "`Verify` runs" — a second fixture
+- **`run-e2e-audit.sh`** — issue #23's hash-chained audit trail (Phase
+  4c-4) plus issue #25's `GET /admin/audit` endpoint (Phase 4c-5),
+  against the real compiled binary: a rejected, unauthenticated request
+  first (must leave no record), then three real admin operations
+  through the full dual-trust gate. **Issue #25's checks**: all three
+  operations are retrievable via the real HTTP endpoint (both the
+  NHI-token-plus-header pair and a cookie alone, no NHI token anywhere
+  in that specific request), most-recent-first ordering, and real
+  pagination (`limit`/`before_id`, confirming the second page is
+  strictly older and non-overlapping with the first). **Issue #23's
+  original checks, unchanged**: since chain *verification* still isn't
+  exposed over HTTP (deliberately out of scope for issue #25), this
+  also opens the actual `store_db_path` file directly via a real
+  fixture program (`internal/audit/testdata/verifychain`) to confirm
+  the chain verifies cleanly, then the real tamper-evidence proof — not
+  just "`Verify` runs" — a second fixture
   (`internal/audit/testdata/corruptrow`) directly `UPDATE`s one row in
   the SQLite file via raw SQL (bypassing `store.Store`'s append-only
   interface entirely, simulating real attacker/operator DB access),
