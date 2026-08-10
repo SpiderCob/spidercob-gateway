@@ -77,6 +77,11 @@ for _ in $(seq 1 50); do
 	fi
 	sleep 0.2
 done
+if ! curl -sf "${snoop_base}/api/users/me" >/dev/null 2>&1; then
+	echo "fake spider-snoop never became ready; log:" >&2
+	cat "$work_dir/snoop.log" >&2
+	exit 1
+fi
 
 echo "==> writing e2e config (admin API enabled)"
 cat >"$work_dir/config.json" <<EOF

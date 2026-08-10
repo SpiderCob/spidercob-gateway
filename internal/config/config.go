@@ -436,6 +436,12 @@ func Load(path string) (*Config, error) {
 		if (p.RateLimitMaxCalls == nil) != (p.RateLimitWindowSeconds == nil) {
 			return nil, fmt.Errorf("policies entry for group %q node %q: rate_limit_max_calls and rate_limit_window_seconds must be set together", p.Group, p.Node)
 		}
+		if p.RateLimitMaxCalls != nil && *p.RateLimitMaxCalls <= 0 {
+			return nil, fmt.Errorf("policies entry for group %q node %q: rate_limit_max_calls must be positive, got %d", p.Group, p.Node, *p.RateLimitMaxCalls)
+		}
+		if p.RateLimitWindowSeconds != nil && *p.RateLimitWindowSeconds <= 0 {
+			return nil, fmt.Errorf("policies entry for group %q node %q: rate_limit_window_seconds must be positive, got %d", p.Group, p.Node, *p.RateLimitWindowSeconds)
+		}
 	}
 	return &c, nil
 }

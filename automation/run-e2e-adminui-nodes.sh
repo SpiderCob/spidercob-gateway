@@ -107,6 +107,12 @@ echo "==> logging in via the browser session (cookie), no NHI token anywhere in 
 cookie_jar="$work_dir/cookies.txt"
 curl -sS -c "$cookie_jar" -X POST "${base}/admin/ui/session" \
 	-d '{"spider_snoop_session_token":"a-real-spider-snoop-session-token"}' >/dev/null
+# If login itself is broken, every check below would fail too -- but with
+# a misleading "/admin/nodes regression" flavor instead of pointing at
+# login/setup. Assert the cookie actually landed first (mirrors
+# run-e2e-adminui-session.sh) so a login break is diagnosed as exactly
+# that.
+check "a cookie was actually set" "$([[ -s "$cookie_jar" ]] && grep -q spidercob_admin_session "$cookie_jar" && echo yes || echo no)" "yes"
 
 echo "==> THE DoD MOMENT: the cookie alone now succeeds on /admin/nodes (issue #19 -- it did not before)"
 list_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" "${base}/admin/nodes")
@@ -124,8 +130,11 @@ list_body_after_create=$(curl -sS -b "$cookie_jar" "${base}/admin/nodes")
 check_contains "the cookie-registered node is really persisted" "$list_body_after_create" "cookie-created"
 
 echo "==> deleting the config-sourced node via the cookie is refused, same 409 message as the NHI path"
-delete_config_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" -X DELETE "${base}/admin/nodes/jira")
+delete_config_resp=$(curl -sS -b "$cookie_jar" -X DELETE "${base}/admin/nodes/jira" -w '\n%{http_code}')
+delete_config_status=$(tail -n1 <<<"$delete_config_resp")
+delete_config_body=$(sed '$d' <<<"$delete_config_resp")
 check "cookie alone refused deleting a config-sourced node" "$delete_config_status" "409"
+check_contains "the 409 actually explains it's config-defined" "$delete_config_body" "this node is defined in config.json"
 
 still_listed_body=$(curl -sS -b "$cookie_jar" "${base}/admin/nodes")
 check_contains "the config-sourced node still exists after the refused delete" "$still_listed_body" '"name":"jira"'
