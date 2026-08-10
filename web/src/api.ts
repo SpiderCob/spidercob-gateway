@@ -170,3 +170,30 @@ export function createNode(input: CreateNodeInput): Promise<Node> {
 export function deleteNode(name: string): Promise<void> {
   return request<void>('DELETE', `/admin/nodes/${encodeURIComponent(name)}`)
 }
+
+// --- Audit (issue #25) ---
+
+export interface AuditRecord {
+  id: number
+  ts: string
+  actor_nhi_subject?: string
+  actor_human_username: string
+  actor_human_role: string
+  action: string
+  resource: string
+  prev_hash: string
+  hash: string
+}
+
+// listAuditRecords fetches one page, most-recent-first. beforeID
+// omitted (or 0) starts from the most recent record; pass the last
+// record's id from a previous page to fetch older entries -- the same
+// "load older" pattern the admin UI's Audit screen uses to append
+// rather than replace what's already shown.
+export function listAuditRecords(limit?: number, beforeID?: number): Promise<AuditRecord[]> {
+  const params = new URLSearchParams()
+  if (limit) params.set('limit', String(limit))
+  if (beforeID) params.set('before_id', String(beforeID))
+  const qs = params.toString()
+  return request<AuditRecord[]>('GET', `/admin/audit${qs ? `?${qs}` : ''}`)
+}

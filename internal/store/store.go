@@ -333,4 +333,22 @@ type Store interface {
 	// ListAuditRecords returns every audit_log row in chain order
 	// (ascending id) -- the read side audit.Verify runs against.
 	ListAuditRecords(ctx context.Context) ([]AuditLogEntry, error)
+	// ListAuditRecordsPage returns up to limit audit_log rows in
+	// descending id order (most recent first), starting just before
+	// beforeID (beforeID == 0 means "start from the most recent
+	// record") -- the admin UI's audit viewer (issue #25) reads
+	// through this, never ListAuditRecords, which exists for
+	// audit.Verify's different need (the whole chain, in order). limit
+	// <= 0 falls back to DefaultAuditPageSize; limit above
+	// MaxAuditPageSize is clamped to it -- a single request can never
+	// force the whole table to serialize.
+	ListAuditRecordsPage(ctx context.Context, limit int, beforeID int64) ([]AuditLogEntry, error)
 }
+
+// DefaultAuditPageSize and MaxAuditPageSize bound ListAuditRecordsPage
+// (issue #25): the former is used when a caller passes a non-positive
+// limit, the latter is the hard ceiling no requested limit can exceed.
+const (
+	DefaultAuditPageSize = 20
+	MaxAuditPageSize     = 100
+)

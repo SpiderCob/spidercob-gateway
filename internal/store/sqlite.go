@@ -766,6 +766,47 @@ func (s *SQLiteStore) ListAuditRecords(ctx context.Context) ([]AuditLogEntry, er
 	return entries, rows.Err()
 }
 
+// ListAuditRecordsPage returns up to limit rows in descending id order
+// (most recent first), starting just before beforeID -- see the
+// Store interface doc comment for the limit/beforeID semantics.
+func (s *SQLiteStore) ListAuditRecordsPage(ctx context.Context, limit int, beforeID int64) ([]AuditLogEntry, error) {
+	if limit <= 0 {
+		limit = DefaultAuditPageSize
+	}
+	if limit > MaxAuditPageSize {
+		limit = MaxAuditPageSize
+	}
+
+	var rows *sql.Rows
+	var err error
+	if beforeID <= 0 {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, ts, actor_nhi_subject, actor_human_username, actor_human_role, action, resource, prev_hash, hash
+			 FROM audit_log ORDER BY id DESC LIMIT ?`, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, ts, actor_nhi_subject, actor_human_username, actor_human_role, action, resource, prev_hash, hash
+			 FROM audit_log WHERE id < ? ORDER BY id DESC LIMIT ?`, beforeID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []AuditLogEntry
+	for rows.Next() {
+		var e AuditLogEntry
+		var actorNHISubject sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &actorNHISubject, &e.ActorHumanUsername,
+			&e.ActorHumanRole, &e.Action, &e.Resource, &e.PrevHash, &e.Hash); err != nil {
+			return nil, err
+		}
+		e.ActorNHISubject = actorNHISubject.String
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // isUniqueConstraint reports whether err came from a UNIQUE constraint
 // violation. modernc.org/sqlite doesn't export a typed error for this, so
 // this falls back to matching the driver's message text.

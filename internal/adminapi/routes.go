@@ -118,6 +118,13 @@ func (a *AdminAPI) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/nodes", a.gateBrowserOrService(a.createNode))
 	mux.HandleFunc("DELETE /admin/nodes/{name}", a.gateBrowserOrService(a.deleteNode))
 
+	// Audit (issue #25) accepts both credential shapes from the start --
+	// unlike nodes, there's no dual-trust reason to restrict a
+	// read-only viewing endpoint to service-to-service callers only at
+	// launch, since the admin UI's Audit screen needs the cookie path
+	// to work immediately.
+	mux.HandleFunc("GET /admin/audit", a.gateBrowserOrService(a.listAudit))
+
 	// UI session lifecycle (issue #17) -- these three are the login/
 	// whoami/logout surface itself, so none of them sit behind either
 	// gate: createUISession *establishes* trust from a fresh spider-

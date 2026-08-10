@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Real end-to-end smoke test for issue #23's hash-chained audit trail
-# (Phase 4c-4), against the real compiled binary: real admin operations
-# through the full dual-trust gate leave real, persisted audit_log rows
-# -- proven by opening the actual store_db_path file directly (via the
-# real verifychain fixture, not a mock) since no HTTP endpoint exposes
-# audit records yet (out of scope for this issue). Also proves a
-# rejected/unauthenticated request leaves no record, and -- the real
+# (Phase 4c-4) and issue #25's GET /admin/audit endpoint, against the
+# real compiled binary: real admin operations through the full
+# dual-trust gate leave real, persisted audit_log rows -- proven both
+# via the real HTTP endpoint (issue #25: NHI-token-plus-header *and* a
+# cookie alone, plus real pagination) and by opening the actual
+# store_db_path file directly (via the real verifychain fixture, not a
+# mock) since chain verification itself still isn't exposed over HTTP
+# (deliberately out of scope for issue #25). Also proves a rejected/
+# unauthenticated request leaves no record, and -- the real
 # tamper-evidence proof, not just "Verify runs" -- directly corrupts one
 # row in the SQLite file (via the real corruptrow fixture) and confirms
 # verification now fails and names that record.
@@ -136,6 +139,41 @@ delete_group_status=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${base}
 	-H "Authorization: Bearer ${admin_token}" \
 	-H "X-Spidercob-Admin-Session: whatever-spider-snoop-session-token")
 check "delete_group succeeded" "$delete_group_status" "204"
+
+echo "==> THE DoD MOMENT (issue #25, part 1): the three real operations above are retrievable via the real HTTP endpoint"
+audit_body=$(curl -sS "${base}/admin/audit" \
+	-H "Authorization: Bearer ${admin_token}" \
+	-H "X-Spidercob-Admin-Session: whatever-spider-snoop-session-token")
+check_contains "create_agent visible via GET /admin/audit" "$audit_body" '"action":"create_agent"'
+check_contains "create_group visible via GET /admin/audit" "$audit_body" '"action":"create_group"'
+check_contains "delete_group visible via GET /admin/audit" "$audit_body" '"action":"delete_group"'
+record_count=$(echo "$audit_body" | grep -o '"id":[0-9]*' | wc -l | tr -d ' ')
+check "exactly 3 records over HTTP too" "$record_count" "3"
+
+first_action=$(echo "$audit_body" | grep -o '"action":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
+check "most recent action (delete_group) is listed first" "$first_action" "delete_group"
+
+echo "==> a cookie alone (no NHI token anywhere in this request) can read the audit trail too (issue #25)"
+cookie_jar="$work_dir/cookies.txt"
+curl -sS -c "$cookie_jar" -X POST "${base}/admin/ui/session" \
+	-d '{"spider_snoop_session_token":"a-real-spider-snoop-session-token"}' >/dev/null
+cookie_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie_jar" "${base}/admin/audit")
+check "cookie alone succeeds on GET /admin/audit" "$cookie_audit_status" "200"
+
+echo "==> THE DoD MOMENT (issue #25, part 2): real pagination -- before_id fetches strictly older, non-overlapping records"
+page1_body=$(curl -sS "${base}/admin/audit?limit=2" \
+	-H "Authorization: Bearer ${admin_token}" \
+	-H "X-Spidercob-Admin-Session: whatever-spider-snoop-session-token")
+page1_count=$(echo "$page1_body" | grep -o '"id":[0-9]*' | wc -l | tr -d ' ')
+check "first page respects limit=2" "$page1_count" "2"
+page1_last_id=$(echo "$page1_body" | grep -o '"id":[0-9]*' | tail -1 | sed -E 's/"id"://')
+
+page2_body=$(curl -sS "${base}/admin/audit?limit=2&before_id=${page1_last_id}" \
+	-H "Authorization: Bearer ${admin_token}" \
+	-H "X-Spidercob-Admin-Session: whatever-spider-snoop-session-token")
+check_contains "second page contains the oldest record (create_agent)" "$page2_body" '"action":"create_agent"'
+page2_has_page1_last=$(echo "$page2_body" | grep -c "\"id\":${page1_last_id}" || true)
+check "second page does not overlap with the first (before_id excludes it)" "$page2_has_page1_last" "0"
 
 echo "==> stopping the gateway so the store file is quiescent for direct inspection"
 kill "$gw_pid" 2>/dev/null || true
