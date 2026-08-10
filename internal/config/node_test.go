@@ -59,6 +59,35 @@ func TestValidateNode(t *testing.T) {
 			in:      Node{Name: "jira ", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
 			wantErr: true,
 		},
+		{
+			// Flagged by Copilot's review on PR #16: the doc comment
+			// claims the name is safe as a URL path segment and RFC
+			// 8707 resource-URI suffix, but a space isn't -- it would
+			// need escaping and wouldn't round-trip through the
+			// proxy's /mcp/<name>/ routing, which never unescapes.
+			name:    "name contains a space",
+			in:      Node{Name: "jira prod", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
+			wantErr: true,
+		},
+		{
+			name:    "name contains a percent sign",
+			in:      Node{Name: "jira%20prod", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
+			wantErr: true,
+		},
+		{
+			name:    "name contains a question mark",
+			in:      Node{Name: "jira?", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
+			wantErr: true,
+		},
+		{
+			name:    "name contains a hash",
+			in:      Node{Name: "jira#1", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
+			wantErr: true,
+		},
+		{
+			name: "name with dots, underscores, and hyphens is valid",
+			in:   Node{Name: "jira-prod_v2.internal", Transport: TransportStreamableHTTP, UpstreamURL: "http://localhost:3001"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -39,6 +39,16 @@ var (
 	ErrUntrustedIssuer  = errors.New("idptrust: untrusted issuer")
 	ErrWrongAudience    = errors.New("idptrust: assertion audience does not match this gateway")
 	ErrInvalidAssertion = errors.New("idptrust: invalid assertion")
+	// ErrMissingRequiredClaim covers exp/jti/sub -- jwt.RegisteredClaims
+	// treats all three as optional per the JWT spec, but every caller of
+	// Validate downstream (internal/authserver's handleJWTBearer)
+	// depends on all three actually being present: exp for one-time-use
+	// expiry bookkeeping (a nil exp would otherwise panic dereferencing
+	// claims.ExpiresAt.Time), jti for one-time-use enforcement itself,
+	// sub for JIT user resolution. Rejecting here, once, keeps that
+	// contract enforced at the trust boundary instead of relying on
+	// every downstream caller to individually guard against absence.
+	ErrMissingRequiredClaim = errors.New("idptrust: assertion is missing a required claim")
 )
 
 // TrustedIssuer is one externally-trusted IdP: where its JWKS lives, and
@@ -99,10 +109,13 @@ func (ts *TrustStore) HasAny() bool {
 
 // Validate verifies assertion's signature against the actual JWKS of the
 // issuer it claims to be from, that the claimed issuer is one this gateway
-// trusts, and that its audience matches that issuer's configured expected
-// audience. It deliberately does NOT check jti one-time-use -- that
-// depends on the caller's own revocation/denylist state, which this
-// package has no access to and shouldn't need to.
+// trusts, that its audience matches that issuer's configured expected
+// audience, and that exp/jti/sub are all actually present (jwt.
+// RegisteredClaims alone treats all three as optional; every downstream
+// caller needs all three, so Validate is the one place that contract is
+// enforced -- see ErrMissingRequiredClaim). It deliberately does NOT check
+// jti one-time-use -- that depends on the caller's own revocation/denylist
+// state, which this package has no access to and shouldn't need to.
 func (ts *TrustStore) Validate(assertion string) (*Claims, error) {
 	// Peek at the unverified iss to know which issuer's JWKS to verify
 	// against -- there's no single shared key space across every trusted
@@ -124,9 +137,21 @@ func (ts *TrustStore) Validate(assertion string) (*Claims, error) {
 	}
 
 	claims := &Claims{}
-	_, err := jwt.ParseWithClaims(assertion, claims, kf.Keyfunc, jwt.WithLeeway(clockSkewLeeway))
+	_, err := jwt.ParseWithClaims(assertion, claims, kf.Keyfunc,
+		jwt.WithLeeway(clockSkewLeeway), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidAssertion, err)
+	}
+
+	// jwt.RegisteredClaims treats jti and sub as optional per the JWT
+	// spec (unlike exp, there's no built-in parser option to require
+	// them), but every downstream caller of Validate depends on both
+	// being present -- see ErrMissingRequiredClaim's doc comment.
+	if claims.ID == "" {
+		return nil, fmt.Errorf("%w: jti", ErrMissingRequiredClaim)
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("%w: sub", ErrMissingRequiredClaim)
 	}
 
 	// Belt-and-suspenders: the verified claims should already agree with

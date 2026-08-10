@@ -287,6 +287,36 @@ func TestLoad_ValidTrustedIdPAccepted(t *testing.T) {
 	}
 }
 
+// TestLoad_DefaultIssuerWithBareListenPort mirrors the existing default
+// behavior for the common ":8080"-style listen value -- must keep
+// working exactly as before after the fix below.
+func TestLoad_DefaultIssuerWithBareListenPort(t *testing.T) {
+	path := writeConfig(t, `{"listen":":8080","nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Issuer != "http://localhost:8080" {
+		t.Fatalf("Issuer = %q, want http://localhost:8080", cfg.Issuer)
+	}
+}
+
+// TestLoad_DefaultIssuerWithExplicitHostInListen guards against the real
+// bug Copilot's review flagged on PR #4: naive string concatenation
+// ("http://localhost" + Listen) produces an invalid issuer URL
+// (http://localhost0.0.0.0:8080) when listen names an explicit host,
+// not just a bare port.
+func TestLoad_DefaultIssuerWithExplicitHostInListen(t *testing.T) {
+	path := writeConfig(t, `{"listen":"0.0.0.0:8080","nodes":[]}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Issuer != "http://localhost:8080" {
+		t.Fatalf("Issuer = %q, want http://localhost:8080 (the listen host is not a meaningful client-facing hostname)", cfg.Issuer)
+	}
+}
+
 func TestLoad_ExplicitIssuerNotOverridden(t *testing.T) {
 	path := writeConfig(t, `{"issuer":"https://gateway.example.com","nodes":[]}`)
 	cfg, err := Load(path)
