@@ -104,24 +104,36 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
   default; the finding's premise (major.minor is the norm, patch gets
   normalized away) matches an older Go tooling convention, not this one.
   No change made.
-- [ ] `deploy/docker-compose.yml` — Keycloak image floats on `:latest`;
-  pin a known-good version. (orig. PR #6)
-- [ ] `docs/spec/conformance.md` — claims the actor chain (`act` claim) is
-  preserved, but captured vectors show no `act` present. (orig. PR #6)
-- [ ] `internal/config/config.go` — doc comment calls the rate limiter a
+- [x] `deploy/docker-compose.yml` — Keycloak image floats on `:latest`;
+  pin a known-good version. (orig. PR #6) — **checked, already a
+  deliberate decision**: the surrounding comment (added since PR #6)
+  already explains `:latest` is intentional -- this harness is meant to
+  track "current Keycloak" so a version-drift interop failure surfaces
+  early, not late. No change made.
+- [x] `docs/spec/conformance.md` — claims the actor chain (`act` claim) is
+  preserved, but captured vectors show no `act` present. (orig. PR #6) —
+  **verified the claim still holds**: `interop/vectors/*.json` really do
+  have no `act` (Keycloak sends `azp` instead). Reworded the conformance
+  row to say so honestly (mechanism unit-tested, not demonstrated
+  end-to-end against real Keycloak) rather than implement `azp`->`act`
+  mapping, which is a real, separate, security-sensitive enhancement, not
+  a Tier 2-sized fix.
+- [x] `internal/config/config.go` — doc comment calls the rate limiter a
   "rolling window"; the implementation is a fixed-window counter.
-  (orig. PR #8)
-- [ ] `internal/policy/evaluator_test.go` — test named around "Revoked"
-  actually exercises rate limiting (429), not revocation. (orig. PR #8)
-- [ ] `README.md` (x2: intro + roadmap) — says a config-declared node
+  (orig. PR #8) — fixed.
+- [x] `internal/policy/evaluator_test.go` — test named around "Revoked"
+  actually exercises rate limiting (429), not revocation. (orig. PR #8) —
+  renamed to `TestEvaluator_ExceededRateLimitReturns429Shape`.
+- [x] `README.md` (x2: intro + roadmap) — says a config-declared node
   "wins on conflict"; actual behavior rejects the collision instead.
-  (orig. PR #16)
-- [ ] `README.md` — "Small-team-shaped" bullet implies the admin UI is
+  (orig. PR #16) — fixed.
+- [x] `README.md` — "Small-team-shaped" bullet implies the admin UI is
   usable in the standalone (no spider-snoop) + CSV-seeded-users story,
   which it isn't (admin UI is gated on spider-snoop integration).
-  (orig. PR #22)
-- [ ] `internal/adminapi/routes.go` — `logAdminAction`'s doc comment is
+  (orig. PR #22) — fixed.
+- [x] `internal/adminapi/routes.go` — `logAdminAction`'s doc comment is
   duplicated (a pre-issue-#23 block plus the updated one). (orig. PR #24)
+  — fixed.
 
 ### Group E — e2e script hardening
 - [ ] `automation/run-e2e-adminui-nodes.sh` — logs in but never asserts a

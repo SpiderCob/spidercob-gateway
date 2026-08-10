@@ -297,9 +297,11 @@ type PolicyRule struct {
 	// when Methods includes "tools/call". Empty means every tool.
 	Tools []string `json:"tools,omitempty"`
 	// RateLimitMaxCalls and RateLimitWindowSeconds, if both set, cap how
-	// many calls this rule's group/node combination may make in a
-	// rolling window -- defense-in-depth, in-memory, per-process only
-	// (not durable, not shared across replicas).
+	// many calls this rule's group/node combination may make in a fixed
+	// window (not rolling -- see internal/policy/ratelimit.go; burst
+	// behavior differs at window boundaries) -- defense-in-depth,
+	// in-memory, per-process only (not durable, not shared across
+	// replicas).
 	RateLimitMaxCalls      *int `json:"rate_limit_max_calls,omitempty"`
 	RateLimitWindowSeconds *int `json:"rate_limit_window_seconds,omitempty"`
 	// BlockOnScanFlag escalates any non-clean verdict from the existing

@@ -231,9 +231,6 @@ func bearerToken(r *http.Request) (string, bool) {
 }
 
 // logAdminAction records every successful admin mutation with both
-// halves of the request's identity (story 22) -- a queryable trail even
-// before internal/audit exists.
-// logAdminAction records every successful admin mutation with both
 // halves of the request's identity (story 22) -- a live slog line as
 // before, plus (issue #23) a real, persisted, hash-chained
 // audit_log row via store.AppendAuditRecord. A store failure here is
