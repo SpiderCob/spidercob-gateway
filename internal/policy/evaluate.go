@@ -28,6 +28,23 @@ func matches(p store.Policy, method, tool string) bool {
 	return true
 }
 
+// moreRestrictive reports whether (calls1 over window1) is a stricter
+// rate limit than (calls2 over window2). "Most restrictive" means the
+// lower effective rate (calls/window), not the smaller raw max_calls --
+// 1/sec is far stricter than 2/hour even though 1 < 2. Compared via
+// cross-multiplication (calls1*window2 vs calls2*window1) to avoid
+// floating point. When the effective rate is exactly equal, the smaller
+// max_calls wins as a tie-break: 1/60s and 10/600s average the same rate,
+// but 1/60s permits far less burst.
+func moreRestrictive(calls1, window1, calls2, window2 int) bool {
+	lhs := int64(calls1) * int64(window2)
+	rhs := int64(calls2) * int64(window1)
+	if lhs != rhs {
+		return lhs < rhs
+	}
+	return calls1 < calls2
+}
+
 func contains(list []string, v string) bool {
 	for _, s := range list {
 		if s == v {
@@ -45,7 +62,8 @@ func contains(list []string, v string) bool {
 // additive for the allow/deny outcome itself; for BlockOnScanFlag, any
 // matching ALLOW rule requesting it is enough to apply it (escalating too
 // eagerly is the safe direction); for rate limiting, the most restrictive
-// (smallest max-calls) among matching ALLOW rules that set one applies.
+// (lowest effective rate, calls/window -- see moreRestrictive) among
+// matching ALLOW rules that set one applies.
 func evaluate(policies []store.Policy, method, tool string) evalResult {
 	var sawAllow, sawDeny bool
 	var blockOnScanFlag bool
@@ -63,7 +81,8 @@ func evaluate(policies []store.Policy, method, tool string) evalResult {
 			if p.BlockOnScanFlag {
 				blockOnScanFlag = true
 			}
-			if p.RateLimitMaxCalls != nil && (maxCalls == nil || *p.RateLimitMaxCalls < *maxCalls) {
+			if p.RateLimitMaxCalls != nil && p.RateLimitWindowSeconds != nil &&
+				(maxCalls == nil || moreRestrictive(*p.RateLimitMaxCalls, *p.RateLimitWindowSeconds, *maxCalls, *windowSeconds)) {
 				maxCalls = p.RateLimitMaxCalls
 				windowSeconds = p.RateLimitWindowSeconds
 			}

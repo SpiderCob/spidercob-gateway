@@ -28,6 +28,24 @@ func TestEvaluator_UnknownPrincipalDefaultsDeny(t *testing.T) {
 	}
 }
 
+func TestEvaluator_UnrecognizedPrincipalPrefixResolvesToNoGroupsNotError(t *testing.T) {
+	// principalGroupIDs' own doc comment says an unrecognized prefix
+	// resolves to "no groups" (default-deny) without a separate error
+	// path -- matching the lookup-miss case right above it. Assert that
+	// contract directly rather than only through Decide(), which would
+	// mask the difference (both an error and empty groups end up denied).
+	ev, _ := newTestEvaluator(t)
+	ctx := context.Background()
+
+	ids, err := ev.principalGroupIDs(ctx, "not-a-recognized-shape:whoever")
+	if err != nil {
+		t.Fatalf("principalGroupIDs: expected (nil, nil) for an unrecognized prefix, got err=%v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("principalGroupIDs: expected no groups, got %v", ids)
+	}
+}
+
 func TestEvaluator_UserWithNoGroupsDefaultsDeny(t *testing.T) {
 	ev, s := newTestEvaluator(t)
 	ctx := context.Background()

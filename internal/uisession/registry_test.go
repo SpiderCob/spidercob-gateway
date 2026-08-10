@@ -100,3 +100,29 @@ func TestRegistry_GetAgedOutSessionNotFound(t *testing.T) {
 		t.Fatal("Get on a session older than maxAge returned ok=true")
 	}
 }
+
+func TestRegistry_GetDeletesAgedOutEntryFromMap(t *testing.T) {
+	// Regression test: an aged-out session used to just be reported as
+	// "not found" while its entry stayed in the map indefinitely. A
+	// lookup that discovers a session is aged-out should clean it up
+	// right there, so repeated logins/scripted use during testing don't
+	// accumulate junk entries forever.
+	reg, clock := newTestRegistry(time.Hour)
+
+	s, err := reg.Create("human-a")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	clock.advance(2 * time.Hour)
+
+	if _, ok := reg.Get(s.Token); ok {
+		t.Fatal("Get on a session older than maxAge returned ok=true")
+	}
+
+	reg.mu.Lock()
+	_, stillPresent := reg.sessions[s.Token]
+	reg.mu.Unlock()
+	if stillPresent {
+		t.Fatal("expected the aged-out session to be removed from the map by Get")
+	}
+}

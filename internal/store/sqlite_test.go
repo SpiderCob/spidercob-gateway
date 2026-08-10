@@ -162,6 +162,15 @@ func TestListAgents(t *testing.T) {
 	if len(agents) != 2 {
 		t.Fatalf("ListAgents = %+v, want 2 agents", agents)
 	}
+
+	// ListAgents backs the admin API's GET /admin/agents, which never
+	// returns or uses secret_hash -- don't pull credential material into
+	// memory (and this response's blast radius) that no caller needs.
+	for _, a := range agents {
+		if a.SecretHash != "" {
+			t.Fatalf("ListAgents must not populate SecretHash, got %q for %s", a.SecretHash, a.ClientID)
+		}
+	}
 }
 
 func TestRevokeAgent(t *testing.T) {

@@ -9,6 +9,22 @@ function ruleKey(r: PolicyRule): string {
   return `${r.group}|${r.node}|${r.rule_type}|${(r.methods ?? []).join(',')}|${(r.tools ?? []).join(',')}`
 }
 
+// parseCommaList splits a comma-separated input field into a trimmed,
+// non-empty entry list, or undefined if that leaves nothing -- matching
+// the backend's contract, where a non-empty Methods/Tools list is a
+// restrictive allowlist. A trailing/double comma or whitespace-only
+// entry must not silently produce an empty-string element: the backend
+// would then treat it as an allowlist entry that can never match any
+// real method/tool name, locking access down instead of leaving it
+// unrestricted.
+function parseCommaList(value: string): string[] | undefined {
+  const entries = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+  return entries.length > 0 ? entries : undefined
+}
+
 export default function Policies() {
   const [saved, setSaved] = useState<PolicyRule[] | null>(null)
   const [draft, setDraft] = useState<PolicyRule[]>([])
@@ -115,22 +131,14 @@ export default function Policies() {
                   <td>
                     <input
                       value={(r.methods ?? []).join(',')}
-                      onChange={(e) =>
-                        updateRule(i, {
-                          methods: e.target.value ? e.target.value.split(',').map((s) => s.trim()) : undefined,
-                        })
-                      }
+                      onChange={(e) => updateRule(i, { methods: parseCommaList(e.target.value) })}
                       placeholder="all"
                     />
                   </td>
                   <td>
                     <input
                       value={(r.tools ?? []).join(',')}
-                      onChange={(e) =>
-                        updateRule(i, {
-                          tools: e.target.value ? e.target.value.split(',').map((s) => s.trim()) : undefined,
-                        })
-                      }
+                      onChange={(e) => updateRule(i, { tools: parseCommaList(e.target.value) })}
                       placeholder="all"
                     />
                   </td>

@@ -216,9 +216,15 @@ func (s *SQLiteStore) GetAgentByID(ctx context.Context, id int64) (Agent, error)
 	return a, err
 }
 
+// ListAgents intentionally never selects secret_hash: its only caller
+// (GET /admin/agents) never uses or returns it, so there's no reason to
+// pull credential material into memory and increase the blast radius of
+// accidental logging or future reuse of these Agent structs. Callers that
+// actually need a secret hash (auth verification) go through
+// GetAgentByClientID/GetAgentByID instead.
 func (s *SQLiteStore) ListAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM agents ORDER BY name`)
+		`SELECT id, client_id, name, created_at, revoked_at FROM agents ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +233,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]Agent, error) {
 	var out []Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.ClientID, &a.SecretHash, &a.Name, &a.CreatedAt, &a.RevokedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ClientID, &a.Name, &a.CreatedAt, &a.RevokedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

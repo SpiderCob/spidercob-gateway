@@ -65,29 +65,35 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
   through only when an Authorization header is actually present.
 
 ### Group C — data hygiene / UX correctness
-- [ ] `internal/store/sqlite.go` `ListAgents` — selects/scans `secret_hash`
+- [x] `internal/store/sqlite.go` `ListAgents` — selects/scans `secret_hash`
   even though no caller uses it; unnecessary blast-radius for credential
-  material. (orig. PR #14)
-- [ ] `internal/uisession/registry.go` `Get` — treats an expired session as
+  material. (orig. PR #14) — fixed.
+- [x] `internal/uisession/registry.go` `Get` — treats an expired session as
   a miss but leaves the entry in the map; should delete on lookup.
-  (orig. PR #18)
-- [ ] `web/src/screens/Policies.tsx` — comma-splitting methods/tools can
+  (orig. PR #18) — fixed.
+- [x] `web/src/screens/Policies.tsx` — comma-splitting methods/tools can
   produce empty strings (trailing/double comma), which the backend then
-  treats as a restrictive allowlist that can never match. (orig. PR #18)
-- [ ] `web/src/screens/Nodes.tsx` `handleCreate` — validates trimmed
+  treats as a restrictive allowlist that can never match. (orig. PR #18) —
+  fixed via `parseCommaList`. (No frontend test harness exists in this
+  repo yet -- verified via `tsc -b`/`oxlint`/`vite build`, all clean.)
+- [x] `web/src/screens/Nodes.tsx` `handleCreate` — validates trimmed
   fields but POSTs the raw (untrimmed) draft, and doesn't strip
-  transport-irrelevant stale fields when switching transports. (orig. PR #20)
-- [ ] `web/src/screens/Nodes.tsx` — `justRegistered` only drives the summary
-  banner, not a per-row indicator on the actual new node. (orig. PR #20)
-- [ ] `internal/policy/evaluator.go` — an unrecognized principal prefix
+  transport-irrelevant stale fields when switching transports.
+  (orig. PR #20) — fixed.
+- [x] `web/src/screens/Nodes.tsx` — `justRegistered` only drives the summary
+  banner, not a per-row indicator on the actual new node. (orig. PR #20) —
+  fixed.
+- [x] `internal/policy/evaluator.go` — an unrecognized principal prefix
   returns an error instead of the documented `(nil, nil)` "no groups"
-  default-deny. (orig. PR #8)
-- [ ] `internal/policy/evaluate.go` — "most restrictive" ALLOW resolution
+  default-deny. (orig. PR #8) — fixed.
+- [x] `internal/policy/evaluate.go` — "most restrictive" ALLOW resolution
   picks the smallest `max_calls` alone, which is wrong when windows differ
-  (1/sec is more restrictive than 2/hour). (orig. PR #8)
-- [ ] `internal/proxy/proxy.go` — schema-enforcement error message
+  (1/sec is more restrictive than 2/hour). (orig. PR #8) — fixed via
+  `moreRestrictive` (effective-rate comparison, `max_calls` as tie-break).
+- [x] `internal/proxy/proxy.go` — schema-enforcement error message
   prepends its own "pinned schema" text on top of `ValidateArguments`'s
   error, which already has one; produces duplicated wording. (orig. PR #12)
+  — fixed.
 
 ### Group D — docs / comments / test naming
 - [x] `go.mod` — `go 1.25.0` should be `go 1.25` (major.minor; patch
