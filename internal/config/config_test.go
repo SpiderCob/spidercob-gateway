@@ -248,6 +248,29 @@ func TestLoad_PolicyRateLimitFieldsMustBePaired(t *testing.T) {
 	}
 }
 
+func TestLoad_PolicyRateLimitMaxCallsMustBePositive(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[{"group":"eng","node":"jira","rule_type":"allow","rate_limit_max_calls":0,"rate_limit_window_seconds":60}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for rate_limit_max_calls = 0")
+	}
+}
+
+func TestLoad_PolicyRateLimitMaxCallsRejectsNegative(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"policies":[{"group":"eng","node":"jira","rule_type":"allow","rate_limit_max_calls":-1,"rate_limit_window_seconds":60}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for a negative rate_limit_max_calls")
+	}
+}
+
+func TestLoad_PolicyRateLimitWindowSecondsMustBePositive(t *testing.T) {
+	// window_seconds = 0 would effectively disable the window entirely --
+	// silently surprising, not an intentional "always allow" escape hatch.
+	path := writeConfig(t, `{"nodes":[],"policies":[{"group":"eng","node":"jira","rule_type":"allow","rate_limit_max_calls":10,"rate_limit_window_seconds":0}]}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for rate_limit_window_seconds = 0")
+	}
+}
+
 func TestLoad_ValidPolicyAccepted(t *testing.T) {
 	path := writeConfig(t, `{"nodes":[],"policies":[
 		{"group":"eng","node":"jira","rule_type":"allow","methods":["tools/call"],"tools":["search_issues"],

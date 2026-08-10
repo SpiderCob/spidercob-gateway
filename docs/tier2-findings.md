@@ -8,6 +8,11 @@ is the durable list Tier 1's write-up said was still missing.
 
 Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
 
+**All of Tier 2 is now fixed or checked-and-found-inapplicable**, landed
+across PRs #30 (group A), #31 (group B), #32 (group C), #33 (group D),
+and the group E/F PR that added this line. Tier 3 (below) is unchanged --
+deliberately left open, no current urgency.
+
 ## Tier 3 — performance-only, deliberately left open (no current urgency)
 
 - `internal/pin/validate.go:37` — `ValidateArguments` recompiles the JSON
@@ -136,20 +141,22 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
   — fixed.
 
 ### Group E — e2e script hardening
-- [ ] `automation/run-e2e-adminui-nodes.sh` — logs in but never asserts a
+- [x] `automation/run-e2e-adminui-nodes.sh` — logs in but never asserts a
   cookie was actually set; a login break would masquerade as an
-  `/admin/nodes` regression. (orig. PR #20)
-- [ ] `automation/run-e2e-adminui-nodes.sh` — claims the cookie-authed
+  `/admin/nodes` regression. (orig. PR #20) — fixed (mirrors
+  `run-e2e-adminui-session.sh`).
+- [x] `automation/run-e2e-adminui-nodes.sh` — claims the cookie-authed
   delete of a config-sourced node returns a specific 409 message but only
-  checks the status code. (orig. PR #20)
-- [ ] `automation/run-e2e-audit.sh` — the fake spider-snoop readiness loop
-  never asserts success after retries. (orig. PR #24)
+  checks the status code. (orig. PR #20) — fixed: now asserts the body.
+- [x] `automation/run-e2e-audit.sh` — the fake spider-snoop readiness loop
+  never asserts success after retries. (orig. PR #24) — fixed (mirrors
+  the gateway's own healthz check below it).
 
 ### Group F — config validation
-- [ ] `internal/config/config.go` — validation only checks that
+- [x] `internal/config/config.go` — validation only checks that
   `rate_limit_max_calls`/`rate_limit_window_seconds` are paired, not that
   they're positive; `window_seconds=0` silently disables the window.
-  (orig. PR #8)
+  (orig. PR #8) — fixed.
 
 ## Already fixed (Tier 1, for cross-reference — do not re-do)
 `internal/authserver/proxy.go` Bearer parsing, `internal/config/config.go`
