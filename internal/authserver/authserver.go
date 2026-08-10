@@ -550,9 +550,19 @@ func (a *AuthServer) handleLogin(w http.ResponseWriter, r *http.Request, node st
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to mint session")
 		return
 	}
+	// MaxAge matches a.sessionTTL -- without it this was a session-only
+	// cookie the browser drops on close, unexpectedly shortening how
+	// long a human can silently re-mint tokens versus what the signed
+	// session_token itself actually allows for. Secure is conditional on
+	// the request having actually arrived over TLS: unconditionally true
+	// would silently break local/dev deployments with no TLS
+	// termination, unconditionally false would let the cookie leak over
+	// a later cleartext connection once this gateway is deployed behind
+	// real TLS.
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: sessionToken,
 		Path: "/token", HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		MaxAge: int(a.sessionTTL.Seconds()), Secure: r.TLS != nil,
 	})
 	writeTokenResponse(w, signed, claims, sessionToken)
 }

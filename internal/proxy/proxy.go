@@ -372,9 +372,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, nodeName string) (AuthClaims, bool) {
 	wwwAuthenticate := fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource/%s"`, g.issuer, nodeName)
 
-	authz := r.Header.Get("Authorization")
-	token, hasBearer := strings.CutPrefix(authz, "Bearer ")
-	if !hasBearer || token == "" {
+	token, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
 		w.Header().Set("WWW-Authenticate", wwwAuthenticate)
 		http.Error(w, "missing bearer token", http.StatusUnauthorized)
 		return AuthClaims{}, false
@@ -388,6 +387,36 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request, nodeName 
 		return AuthClaims{}, false
 	}
 	return claims, true
+}
+
+// bearerToken extracts the token from an Authorization header value,
+// tolerating what RFC 7235 §2.1/RFC 6750 actually allow and a naive
+// exact-match against "Bearer " didn't: the auth-scheme is
+// case-insensitive ("bearer", "BEARER", ... all valid), and RFC 7230's
+// OWS permits more than one space (or a tab) between the scheme and
+// the token, plus surrounding whitespace around the token itself.
+// Still requires an actual separator between the scheme and the token
+// -- "Bearerxyz" is not a valid Bearer header, just a token that
+// happens to start with the same letters. internal/adminapi has an
+// independent, intentionally-parallel implementation of this same
+// logic for its own Authorization header (a different trust boundary,
+// no shared import between the two packages) -- keep both in sync if
+// this logic ever needs to change.
+func bearerToken(authz string) (string, bool) {
+	const scheme = "bearer"
+	if len(authz) <= len(scheme) || !strings.EqualFold(authz[:len(scheme)], scheme) {
+		return "", false
+	}
+	switch authz[len(scheme)] {
+	case ' ', '\t':
+	default:
+		return "", false
+	}
+	token := strings.TrimSpace(authz[len(scheme)+1:])
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *nodeConfig) {

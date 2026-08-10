@@ -61,7 +61,7 @@ func (f *fakeIdP) jwksURL() string { return f.server.URL }
 // deliberately-wrong ones without waiting on a real clock or a real IdP.
 func (f *fakeIdP) mintIDJAG(t *testing.T, sub, aud string, exp, iat time.Time) string {
 	t.Helper()
-	claims := &Claims{
+	return f.mintClaims(t, &Claims{
 		Act: "agent-app",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    f.issuer,
@@ -71,12 +71,20 @@ func (f *fakeIdP) mintIDJAG(t *testing.T, sub, aud string, exp, iat time.Time) s
 			IssuedAt:  jwt.NewNumericDate(iat),
 			ID:        "idjag-jti-1",
 		},
-	}
+	})
+}
+
+// mintClaims signs an arbitrary, caller-constructed Claims value --
+// the lower-level primitive mintIDJAG builds on, exposed directly so
+// tests can construct deliberately-incomplete assertions (e.g. a
+// missing exp/jti/sub) that mintIDJAG's fixed shape can't express.
+func (f *fakeIdP) mintClaims(t *testing.T, claims *Claims) string {
+	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = f.kid
 	signed, err := token.SignedString(f.privateKey)
 	if err != nil {
-		t.Fatalf("sign ID-JAG: %v", err)
+		t.Fatalf("sign assertion: %v", err)
 	}
 	return signed
 }
@@ -202,6 +210,77 @@ func TestValidate_MalformedAssertionRejected(t *testing.T) {
 	})
 	if _, err := ts.Validate("not-a-jwt-at-all"); err == nil {
 		t.Fatalf("expected malformed assertion to be rejected")
+	}
+}
+
+// TestValidate_MissingExpRejected guards against a real panic risk in
+// internal/authserver.handleJWTBearer, which dereferences
+// claims.ExpiresAt.Time unconditionally -- jwt.RegisteredClaims treats
+// exp as optional, so a malicious or misconfigured IdP omitting it
+// would otherwise reach that dereference as a nil pointer.
+func TestValidate_MissingExpRejected(t *testing.T) {
+	idp := newFakeIdP(t, "https://idp.example.com")
+	ts := newTestTrustStore(t, TrustedIssuer{
+		Issuer: idp.issuer, JWKSURL: idp.jwksURL(), ExpectedAudience: gatewayAudience,
+	})
+
+	assertion := idp.mintClaims(t, &Claims{
+		Act: "agent-app",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:   idp.issuer,
+			Subject:  "alice",
+			Audience: jwt.ClaimStrings{gatewayAudience},
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+			ID:       "idjag-jti-missing-exp",
+			// ExpiresAt deliberately omitted.
+		},
+	})
+	if _, err := ts.Validate(assertion); err == nil {
+		t.Fatal("expected an assertion with no exp claim to be rejected")
+	}
+}
+
+func TestValidate_MissingJTIRejected(t *testing.T) {
+	idp := newFakeIdP(t, "https://idp.example.com")
+	ts := newTestTrustStore(t, TrustedIssuer{
+		Issuer: idp.issuer, JWKSURL: idp.jwksURL(), ExpectedAudience: gatewayAudience,
+	})
+
+	assertion := idp.mintClaims(t, &Claims{
+		Act: "agent-app",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    idp.issuer,
+			Subject:   "alice",
+			Audience:  jwt.ClaimStrings{gatewayAudience},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			// ID (jti) deliberately omitted.
+		},
+	})
+	if _, err := ts.Validate(assertion); err == nil {
+		t.Fatal("expected an assertion with no jti claim to be rejected")
+	}
+}
+
+func TestValidate_MissingSubjectRejected(t *testing.T) {
+	idp := newFakeIdP(t, "https://idp.example.com")
+	ts := newTestTrustStore(t, TrustedIssuer{
+		Issuer: idp.issuer, JWKSURL: idp.jwksURL(), ExpectedAudience: gatewayAudience,
+	})
+
+	assertion := idp.mintClaims(t, &Claims{
+		Act: "agent-app",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    idp.issuer,
+			Audience:  jwt.ClaimStrings{gatewayAudience},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        "idjag-jti-missing-sub",
+			// Subject deliberately omitted.
+		},
+	})
+	if _, err := ts.Validate(assertion); err == nil {
+		t.Fatal("expected an assertion with no sub claim to be rejected")
 	}
 }
 

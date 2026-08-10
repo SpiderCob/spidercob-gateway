@@ -5,8 +5,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
-	"strings"
+	"regexp"
 )
 
 // Transport identifies how the gateway reaches a node's upstream.
@@ -29,6 +30,15 @@ type Node struct {
 	PinRefreshIntervalSeconds int `json:"pin_refresh_interval_seconds,omitempty"`
 }
 
+// validNodeName enforces a conservative charset: letters, digits, dot,
+// underscore, hyphen. Tightened by Copilot's review on PR #16 -- the
+// original checks (no "/", no leading/trailing whitespace) were looser
+// than this function's own doc comment claimed: a space, "%", "?", or
+// "#" all passed then, but none of those are actually safe in a URL
+// path segment or an RFC 8707 resource-URI suffix without escaping,
+// and the proxy's /mcp/<name>/ routing never unescapes.
+var validNodeName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // ValidateNode validates n and returns a normalized copy (Transport
 // defaulted to TransportStreamableHTTP if unset) -- the exact per-
 // transport validation config.Load's node loop always applied, now a
@@ -36,16 +46,13 @@ type Node struct {
 // node-creation endpoint enforces the identical rules without
 // duplicating them. Name must also be safe as a URL path segment
 // (routing is "/mcp/<name>/") and as the RFC 8707 resource-URI suffix
-// (issuer + "/mcp/" + name) -- no "/", no leading/trailing whitespace.
+// (issuer + "/mcp/" + name) -- see validNodeName for the exact charset.
 func ValidateNode(n Node) (Node, error) {
 	if n.Name == "" {
 		return Node{}, fmt.Errorf("every node needs a name")
 	}
-	if strings.Contains(n.Name, "/") {
-		return Node{}, fmt.Errorf("node %s: name must not contain \"/\"", n.Name)
-	}
-	if strings.TrimSpace(n.Name) != n.Name {
-		return Node{}, fmt.Errorf("node %s: name must not have leading or trailing whitespace", n.Name)
+	if !validNodeName.MatchString(n.Name) {
+		return Node{}, fmt.Errorf("node %s: name must match [A-Za-z0-9._-]+ (safe as a URL path segment and RFC 8707 resource-URI suffix, unescaped)", n.Name)
 	}
 	if n.Transport == "" {
 		n.Transport = TransportStreamableHTTP
@@ -334,7 +341,22 @@ func Load(path string) (*Config, error) {
 		c.IdleSessionTimeoutSeconds = DefaultIdleSessionTimeoutSeconds
 	}
 	if c.Issuer == "" {
-		c.Issuer = "http://localhost" + c.Listen // dev-friendly guess; set explicitly for real deployments
+		// Dev-friendly guess; set explicitly for real deployments. Only
+		// the port from Listen is meaningful here -- the listen *host*
+		// (e.g. "0.0.0.0", "" meaning all interfaces) isn't the same
+		// thing as a client-facing hostname, and naive string
+		// concatenation ("http://localhost" + Listen) produced an
+		// invalid URL like "http://localhost0.0.0.0:8080" whenever
+		// Listen named an explicit host rather than a bare ":PORT".
+		if _, port, err := net.SplitHostPort(c.Listen); err == nil {
+			c.Issuer = "http://localhost:" + port
+		} else {
+			// Listen doesn't parse as host:port at all -- fall back to
+			// the old literal-concat guess rather than failing Load
+			// outright over a value that's only ever a local-dev
+			// default anyway.
+			c.Issuer = "http://localhost" + c.Listen
+		}
 	}
 	if c.StoreDBPath == "" {
 		c.StoreDBPath = DefaultStoreDBPath

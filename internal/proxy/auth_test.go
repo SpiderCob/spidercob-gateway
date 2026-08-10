@@ -147,6 +147,68 @@ func TestGateway_InvalidBearerTokenRejected(t *testing.T) {
 	}
 }
 
+// TestGateway_LowercaseBearerSchemeAccepted guards RFC 7235 §2.1's
+// case-insensitive auth-scheme requirement (RFC 6750 inherits it) --
+// flagged by Copilot's review on PR #4: the original strings.CutPrefix
+// match against the literal "Bearer " would reject a spec-legal
+// lowercase "bearer" scheme with a 401.
+func TestGateway_LowercaseBearerSchemeAccepted(t *testing.T) {
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	env := newAuthTestEnv(t, upstream.URL, "jira")
+	env.gw.policy = policy.AllowAll{}
+
+	token := env.mintToken(t, "jira")
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Authorization", "bearer "+token)
+	rec := httptest.NewRecorder()
+	env.gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (lowercase \"bearer\" scheme is spec-legal), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGateway_BearerTokenWithExtraWhitespaceAccepted guards against
+// rejecting a token separated from the scheme by more than exactly one
+// space, or with trailing whitespace -- real clients/proxies sometimes
+// introduce this, and RFC 7230's OWS (optional whitespace) allows it.
+func TestGateway_BearerTokenWithExtraWhitespaceAccepted(t *testing.T) {
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	env := newAuthTestEnv(t, upstream.URL, "jira")
+	env.gw.policy = policy.AllowAll{}
+
+	token := env.mintToken(t, "jira")
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Authorization", "Bearer   "+token+"  ")
+	rec := httptest.NewRecorder()
+	env.gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (extra whitespace around the token is tolerated), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGateway_BearerSchemeWithNoSeparatorRejected(t *testing.T) {
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	env := newAuthTestEnv(t, upstream.URL, "jira")
+
+	token := env.mintToken(t, "jira")
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Authorization", "Bearer"+token) // no separator at all
+	rec := httptest.NewRecorder()
+	env.gw.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no separator between scheme and token is not a valid Bearer header), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGateway_WrongAudienceTokenRejected(t *testing.T) {
 	upstream, _ := newFakeUpstreamServer()
 	t.Cleanup(func() { upstream.Close() })

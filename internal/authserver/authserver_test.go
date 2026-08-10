@@ -2,6 +2,7 @@ package authserver
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +249,20 @@ func TestToken_LoginThenSessionReExchange(t *testing.T) {
 		t.Fatalf("expected a mirrored %s cookie", sessionCookieName)
 	}
 
+	// The mirrored cookie's own lifetime should match the session token's
+	// real validity (a.sessionTTL) -- without an explicit MaxAge, this
+	// was a session-only cookie the browser drops on close, unexpectedly
+	// shortening how long a human can silently re-mint tokens versus what
+	// the actual signed session_token allows for (flagged by Copilot's
+	// review on PR #4).
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			if c.MaxAge <= 0 {
+				t.Fatalf("session cookie MaxAge = %d, want a positive value matching the session TTL", c.MaxAge)
+			}
+		}
+	}
+
 	claims, err := env.as.ValidateAccessToken("jira", loginResp.AccessToken)
 	if err != nil {
 		t.Fatalf("ValidateAccessToken (login): %v", err)
@@ -275,6 +290,51 @@ func TestToken_LoginThenSessionReExchange(t *testing.T) {
 	}
 	if _, err := env.as.ValidateAccessToken("jira", sessionResp.AccessToken); err != nil {
 		t.Fatalf("ValidateAccessToken (re-exchanged): %v", err)
+	}
+}
+
+// TestToken_LoginSessionCookieSecureOverTLS guards both directions of
+// the Secure attribute (flagged by Copilot's review on PR #4): set when
+// the request actually arrived over TLS, so the cookie can never leak
+// over a subsequent cleartext connection, but NOT unconditionally set,
+// since that would silently break local/dev deployments that don't
+// terminate TLS themselves.
+func TestToken_LoginSessionCookieSecureOverTLS(t *testing.T) {
+	env := newTestEnv(t, Config{})
+	ctx := context.Background()
+	if _, err := env.svc.CreateUser(ctx, "alice", "s3cret-pw"); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	form := url.Values{
+		"grant_type": {grantLogin},
+		"username":   {"alice"},
+		"password":   {"s3cret-pw"},
+		"resource":   {"jira"},
+	}
+
+	plainReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	plainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	plainRec := httptest.NewRecorder()
+	env.as.Routes().ServeHTTP(plainRec, plainReq)
+	for _, c := range plainRec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Secure {
+			t.Fatal("session cookie is Secure over a plain HTTP request -- would break local/dev deployments with no TLS termination")
+		}
+	}
+
+	tlsReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	tlsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tlsReq.TLS = &tls.ConnectionState{}
+	tlsRec := httptest.NewRecorder()
+	env.as.Routes().ServeHTTP(tlsRec, tlsReq)
+	var sawSecure bool
+	for _, c := range tlsRec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Secure {
+			sawSecure = true
+		}
+	}
+	if !sawSecure {
+		t.Fatal("expected the session cookie to be Secure when the request arrived over TLS")
 	}
 }
 
