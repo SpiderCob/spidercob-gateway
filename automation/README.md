@@ -133,6 +133,21 @@ instead of going through `make`.
   existing user's password on a later run. Not part of
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-audit.sh`** — issue #23's hash-chained audit trail
+  (Phase 4c-4), against the real compiled binary: a rejected,
+  unauthenticated request first (must leave no record), then three
+  real admin operations through the full dual-trust gate. Since no
+  HTTP endpoint exposes audit records yet, this opens the actual
+  `store_db_path` file directly via a real fixture program
+  (`internal/audit/testdata/verifychain`) to confirm exactly three
+  chained records exist and the chain verifies cleanly. Then, the real
+  tamper-evidence proof — not just "`Verify` runs" — a second fixture
+  (`internal/audit/testdata/corruptrow`) directly `UPDATE`s one row in
+  the SQLite file via raw SQL (bypassing `store.Store`'s append-only
+  interface entirely, simulating real attacker/operator DB access),
+  and confirms verification now fails and names that exact record. Not
+  part of `make ci-interop` — no Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

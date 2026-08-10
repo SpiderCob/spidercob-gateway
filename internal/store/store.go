@@ -26,6 +26,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 )
 
 // ErrNotFound is returned by lookup methods when no matching row exists.
@@ -168,6 +170,17 @@ const (
 	NodeSourceAdmin  = "admin"
 )
 
+// AuditLogEntry is one persisted audit_log row (issue #23): an
+// audit.Record together with the ID and hash-chain values it was
+// actually stored with. Embeds audit.StoredRecord directly so a
+// caller wanting to run audit.Verify against real rows (e.g.
+// internal/audit/testdata/verifychain) doesn't need to convert field
+// by field.
+type AuditLogEntry struct {
+	ID int64
+	audit.StoredRecord
+}
+
 // Revocation is one denylisted access-token jti, persisted so the
 // authserver's in-memory denylist survives a gateway restart.
 type Revocation struct {
@@ -307,4 +320,17 @@ type Store interface {
 	// LoadRevocations returns every not-yet-expired revocation, for
 	// hydrating the authserver's in-memory denylist on startup.
 	LoadRevocations(ctx context.Context) ([]Revocation, error)
+
+	// AppendAuditRecord persists rec as the new last entry in the
+	// hash-chained audit log (issue #23): inside one transaction, reads
+	// the current last row's hash (or audit.GenesisPrevHash if the
+	// table is empty), computes the new row's hash via audit.Hash, and
+	// inserts. Deliberately the only write method this package offers
+	// for audit_log -- there is no update or delete of any kind, so
+	// there is no code path that could alter a record after it's
+	// written.
+	AppendAuditRecord(ctx context.Context, rec audit.Record) (AuditLogEntry, error)
+	// ListAuditRecords returns every audit_log row in chain order
+	// (ascending id) -- the read side audit.Verify runs against.
+	ListAuditRecords(ctx context.Context) ([]AuditLogEntry, error)
 }
