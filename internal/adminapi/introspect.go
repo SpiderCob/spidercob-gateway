@@ -3,12 +3,20 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrInvalidSession marks an Introspect failure as spider-snoop explicitly
+// rejecting the human token (401/403) -- a definite "this session is
+// invalid or expired," as opposed to spider-snoop being unreachable,
+// timing out, or erroring, which callers (Gate) should treat very
+// differently: a client error (401), not a service outage (503).
+var ErrInvalidSession = errors.New("adminapi: human session invalid or expired")
 
 // IntrospectionResult is what a successful introspection reveals about
 // the human behind an admin API request.
@@ -65,6 +73,9 @@ func (h *HTTPIntrospector) Introspect(ctx context.Context, humanToken string) (I
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return IntrospectionResult{}, fmt.Errorf("%w (spider-snoop status %d)", ErrInvalidSession, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return IntrospectionResult{}, fmt.Errorf("adminapi: introspection returned status %d", resp.StatusCode)
 	}

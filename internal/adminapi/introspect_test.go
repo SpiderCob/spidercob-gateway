@@ -54,6 +54,39 @@ func TestHTTPIntrospector_NonOKStatusErrors(t *testing.T) {
 	}
 }
 
+func TestHTTPIntrospector_401Or403WrapsErrInvalidSession(t *testing.T) {
+	// spider-snoop explicitly rejecting the human token (401/403) is a
+	// definite "this session is invalid or expired" -- a client error the
+	// caller (Gate) should be able to tell apart from spider-snoop being
+	// unreachable/erroring, so it can respond 401 instead of 503.
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		srv := fakeSpiderSnoopServer(t, "", "", "", status)
+		introspector := NewHTTPIntrospector(srv.URL, time.Second)
+		_, err := introspector.Introspect(context.Background(), "bad-or-expired-token")
+		srv.Close()
+		if !errors.Is(err, ErrInvalidSession) {
+			t.Fatalf("status %d: err = %v, want it to wrap ErrInvalidSession", status, err)
+		}
+	}
+}
+
+func TestHTTPIntrospector_OtherNonOKStatusDoesNotWrapErrInvalidSession(t *testing.T) {
+	// A 500 (or any non-401/403 non-200) from spider-snoop means something
+	// is wrong with spider-snoop itself, not that the session is invalid
+	// -- must stay a generic (503-mapped) failure, not ErrInvalidSession.
+	srv := fakeSpiderSnoopServer(t, "", "", "", http.StatusInternalServerError)
+	t.Cleanup(srv.Close)
+
+	introspector := NewHTTPIntrospector(srv.URL, time.Second)
+	_, err := introspector.Introspect(context.Background(), "whatever")
+	if err == nil {
+		t.Fatal("expected an error for a 500 introspection response, got nil")
+	}
+	if errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("a 500 must not be reported as ErrInvalidSession, got %v", err)
+	}
+}
+
 func TestHTTPIntrospector_UnreachableServerErrors(t *testing.T) {
 	// Fail closed: an unreachable spider-snoop is an error, never a
 	// silent "trust it anyway."
