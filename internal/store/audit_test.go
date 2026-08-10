@@ -208,14 +208,19 @@ func TestListAuditRecordsPage_LimitRespected(t *testing.T) {
 
 func TestListAuditRecordsPage_OverLargeLimitClamped(t *testing.T) {
 	s := openTestStore(t)
-	seedAuditRecords(t, s, DefaultAuditPageSize+5)
+	// Must seed more than MaxAuditPageSize rows -- otherwise this test
+	// passes trivially (there just aren't enough rows to expose broken
+	// clamping) regardless of whether the clamp logic actually works.
+	// Caught by Copilot's automated review on PR #26, which merged this
+	// test in its unfixed form; fixed here as a direct follow-up.
+	seedAuditRecords(t, s, MaxAuditPageSize+10)
 
 	page, err := s.ListAuditRecordsPage(context.Background(), MaxAuditPageSize+1000, 0)
 	if err != nil {
 		t.Fatalf("ListAuditRecordsPage: %v", err)
 	}
-	if len(page) > MaxAuditPageSize {
-		t.Fatalf("got %d records, want at most MaxAuditPageSize (%d)", len(page), MaxAuditPageSize)
+	if len(page) != MaxAuditPageSize {
+		t.Fatalf("got %d records, want exactly MaxAuditPageSize (%d)", len(page), MaxAuditPageSize)
 	}
 }
 
