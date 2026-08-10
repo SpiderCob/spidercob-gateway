@@ -21,25 +21,31 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
 ## Tier 2 — real but lower-stakes, being fixed now
 
 ### Group A — concurrency / store correctness
-- [ ] `internal/proxy/session.go` `reapIdle` — a session can be `touch()`ed
+- [x] `internal/proxy/session.go` `reapIdle` — a session can be `touch()`ed
   after being selected as expired (lock released) but before `end()` runs;
-  it gets torn down anyway. (orig. PR #2)
-- [ ] `internal/proxy/session.go` `end()` — deletes the session mapping
+  it gets torn down anyway. (orig. PR #2) — fixed: select-and-remove now
+  happens atomically under one lock, teardown runs afterward.
+- [x] `internal/proxy/session.go` `end()` — deletes the session mapping
   before calling `teardown()`; if teardown fails, cleanup is non-retryable
-  and can leak the upstream (e.g. a stdio child process). (orig. PR #2)
-- [ ] `internal/store/sqlite.go` — SQLite DSN built by string-interpolating
+  and can leak the upstream (e.g. a stdio child process). (orig. PR #2) —
+  fixed: mapping only removed once the upstream is confirmed gone
+  (`teardown()` succeeds, or `alive()` reports false); a genuine failure
+  (still alive) leaves it in place, retryable via another `end()` call or
+  the next `reapIdle` pass.
+- [x] `internal/store/sqlite.go` — SQLite DSN built by string-interpolating
   `path` directly into a `file:` URI; a path containing `?`/`#` breaks
-  opening the file or injects pragmas/query params. (orig. PR #4)
-- [ ] `internal/store/sqlite.go` `IsRevoked` — returns `true` for a matching
+  opening the file or injects pragmas/query params. (orig. PR #4) — fixed
+  via `sqliteURIPath`.
+- [x] `internal/store/sqlite.go` `IsRevoked` — returns `true` for a matching
   `jti` even after `expires_at` has passed, unlike `LoadRevocations` which
-  filters expired rows. (orig. PR #4)
-- [ ] `internal/identity/password.go` `verifySecret` — parses the Argon2
+  filters expired rows. (orig. PR #4) — fixed.
+- [x] `internal/identity/password.go` `verifySecret` — parses the Argon2
   version from the PHC string but never validates it against the expected
-  version. (orig. PR #4)
-- [ ] `internal/authserver/denylist.go` `tryConsume` — marks a `jti`
+  version. (orig. PR #4) — fixed.
+- [x] `internal/authserver/denylist.go` `tryConsume` — marks a `jti`
   consumed in-memory before persisting; if the store write fails, the
   in-memory mark isn't rolled back, so a client retry gets a false replay
-  (401) instead of another `server_error`. (orig. PR #6)
+  (401) instead of another `server_error`. (orig. PR #6) — fixed.
 
 ### Group B — HTTP status code correctness
 - [ ] `internal/adminapi/introspect.go` `HTTPIntrospector` — returns a
@@ -83,8 +89,14 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
   error, which already has one; produces duplicated wording. (orig. PR #12)
 
 ### Group D — docs / comments / test naming
-- [ ] `go.mod` — `go 1.25.0` should be `go 1.25` (major.minor; patch
-  pinning via `toolchain` directive if needed). (orig. PR #2)
+- [x] `go.mod` — `go 1.25.0` should be `go 1.25` (major.minor; patch
+  pinning via `toolchain` directive if needed). (orig. PR #2) — **checked,
+  doesn't hold**: with the actual installed toolchain (go1.25.0), `go mod
+  tidy` rewrites `go 1.25` straight back to `go 1.25.0` unprompted --
+  modern Go (1.21+) writes the full patch version in the `go` directive by
+  default; the finding's premise (major.minor is the norm, patch gets
+  normalized away) matches an older Go tooling convention, not this one.
+  No change made.
 - [ ] `deploy/docker-compose.yml` — Keycloak image floats on `:latest`;
   pin a known-good version. (orig. PR #6)
 - [ ] `docs/spec/conformance.md` — claims the actor chain (`act` claim) is

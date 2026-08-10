@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
@@ -40,6 +41,25 @@ func TestPasswordHashRoundTrip(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("verifySecret should reject a wrong password")
+	}
+}
+
+func TestVerifySecretRejectsUnsupportedArgon2Version(t *testing.T) {
+	hash, err := hashSecret("correct horse battery staple")
+	if err != nil {
+		t.Fatalf("hashSecret: %v", err)
+	}
+	// Claim an unsupported version (argon2.Version is 0x13 == 19) --
+	// verifySecret parses the version field but must not silently ignore
+	// it; a self-describing format that doesn't check its own version tag
+	// isn't actually self-describing.
+	tampered := strings.Replace(hash, "$v=19$", "$v=16$", 1)
+	if tampered == hash {
+		t.Fatalf("test setup: expected to find $v=19$ in %q", hash)
+	}
+	ok, err := verifySecret("correct horse battery staple", tampered)
+	if err == nil && ok {
+		t.Fatalf("verifySecret must reject a hash claiming an unsupported argon2 version")
 	}
 }
 
