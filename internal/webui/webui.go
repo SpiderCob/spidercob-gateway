@@ -44,5 +44,21 @@ func Handler() http.Handler {
 		slog.Error("admin UI embed is broken", "err", err)
 		return http.NotFoundHandler()
 	}
-	return http.StripPrefix("/ui/", http.FileServerFS(sub))
+	return handlerFor(sub)
+}
+
+// handlerFor is Handler's testable core (issue found by Copilot's
+// review on PR #18): with only the tracked .gitkeep placeholder in
+// dist/ (a fresh clone, no npm build yet), http.FileServerFS alone
+// would serve a directory listing rather than the 404s Handler's own
+// doc comment promises -- explicitly checking for index.html first
+// closes that gap. Separated from Handler so tests can pass a
+// synthetic fs.FS (testing/fstest.MapFS) standing in for a real build
+// vs. a .gitkeep-only one, without depending on this package's own
+// build-time go:embed contents.
+func handlerFor(fsys fs.FS) http.Handler {
+	if _, err := fs.Stat(fsys, "index.html"); err != nil {
+		return http.NotFoundHandler()
+	}
+	return http.StripPrefix("/ui/", http.FileServerFS(fsys))
 }

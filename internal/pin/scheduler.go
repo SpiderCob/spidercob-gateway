@@ -42,10 +42,24 @@ type SchedulerConfig struct {
 	// whether any node is due -- independent of, and normally much
 	// shorter than, any individual node's refresh interval.
 	CheckInterval time.Duration
+	// FetchTimeout bounds each individual node's Fetch call within
+	// RunOnce (issue found by Copilot's review on PR #10): without it,
+	// RunOnce called Fetch with context.Background(), so a hung Fetcher
+	// implementation would block the loop goroutine forever -- Stop()
+	// would then deadlock waiting on done, and one slow/hung node would
+	// delay every subsequent node's refresh in that same tick. Falls
+	// back to DefaultFetchTimeout when zero.
+	FetchTimeout time.Duration
 	// Clock is injectable for tests; real callers leave it nil (defaults
 	// to time.Now).
 	Clock func() time.Time
 }
+
+// DefaultFetchTimeout bounds a single node's tools/list-equivalent
+// fetch during a pin refresh -- long enough for a real upstream to
+// respond, short enough that one hung node can't meaningfully delay
+// the rest of a refresh tick or block Scheduler.Stop().
+const DefaultFetchTimeout = 30 * time.Second
 
 // Scheduler periodically calls Fetcher for every configured node and
 // feeds the result to a Registry, on a per-node interval -- mirrors
@@ -62,6 +76,7 @@ type Scheduler struct {
 	intervals       map[string]time.Duration
 	defaultInterval time.Duration
 	checkInterval   time.Duration
+	fetchTimeout    time.Duration
 
 	mu      sync.Mutex
 	lastRun map[string]time.Time
@@ -89,6 +104,10 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if checkInterval <= 0 {
 		checkInterval = time.Minute
 	}
+	fetchTimeout := cfg.FetchTimeout
+	if fetchTimeout <= 0 {
+		fetchTimeout = DefaultFetchTimeout
+	}
 	return &Scheduler{
 		registry:        cfg.Registry,
 		fetch:           cfg.Fetch,
@@ -97,6 +116,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		intervals:       cfg.Intervals,
 		defaultInterval: cfg.DefaultInterval,
 		checkInterval:   checkInterval,
+		fetchTimeout:    fetchTimeout,
 		lastRun:         make(map[string]time.Time),
 		stop:            make(chan struct{}),
 		done:            make(chan struct{}),
@@ -128,7 +148,9 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 			continue
 		}
 
-		tools, err := s.fetch(ctx, node)
+		fetchCtx, cancel := context.WithTimeout(ctx, s.fetchTimeout)
+		tools, err := s.fetch(fetchCtx, node)
+		cancel()
 		if err != nil {
 			slog.Warn("pin: refresh fetch failed", "node", node, "error", err)
 		} else if err := s.registry.Observe(ctx, node, tools); err != nil {

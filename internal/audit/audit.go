@@ -16,7 +16,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -52,8 +51,13 @@ type StoredRecord struct {
 // GenesisPrevHash is the fixed, documented sentinel prevHash for the
 // first record in a chain -- an explicit, testable value ("chain has
 // zero prior records") rather than an edge case that happens to fall
-// out of using an empty string.
-var GenesisPrevHash = strings.Repeat("0", 64)
+// out of using an empty string. A real const, not a package var
+// (issue found by Copilot's review on PR #24): this defines the audit
+// chain's genesis sentinel, and nothing outside this package should be
+// able to mutate it, accidentally or otherwise -- a var would have let
+// that happen, silently changing what every chain in the process
+// considers valid.
+const GenesisPrevHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
 // Hash returns a stable digest of prevHash chained with rec's fields
 // -- mirrors pin.Hash's exact pattern (null-byte-separated fields, so

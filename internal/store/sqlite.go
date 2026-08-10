@@ -280,22 +280,46 @@ func (s *SQLiteStore) ListGroups(ctx context.Context) ([]Group, error) {
 	return scanGroups(rows)
 }
 
+// DeleteGroup's referenced-by-policy check and the delete itself run
+// inside one transaction (issue found by Copilot's review on PR #14):
+// as three separate statements, a policy could be inserted referencing
+// this group between the COUNT and the DELETE, and the DELETE would
+// then silently cascade-wipe that just-created policy -- exactly what
+// this check exists to prevent. With MaxOpenConns(1) (see this file's
+// top-of-file write-concurrency comment), wrapping in a transaction
+// doesn't just close a logical race: it holds the store's one
+// connection for the whole check+delete, so a concurrent caller's own
+// statement genuinely cannot interleave between them -- it blocks for
+// a connection until this transaction commits or rolls back.
 func (s *SQLiteStore) DeleteGroup(ctx context.Context, name string) error {
-	g, err := s.GetGroupByName(ctx, name)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err // ErrNotFound, or a real lookup error
+		return err
 	}
+	defer func() { _ = tx.Rollback() }() // no-op if already committed
+
+	var groupID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM groups WHERE name = ?`, name).Scan(&groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
 	var refCount int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM policies WHERE group_id = ?`, g.ID,
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM policies WHERE group_id = ?`, groupID,
 	).Scan(&refCount); err != nil {
 		return err
 	}
 	if refCount > 0 {
 		return ErrConflict
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM groups WHERE id = ?`, g.ID)
-	return err
+	if _, err := tx.ExecContext(ctx, `DELETE FROM groups WHERE id = ?`, groupID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) AssignUserGroup(ctx context.Context, userID, groupID int64) error {

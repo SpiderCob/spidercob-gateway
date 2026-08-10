@@ -3,6 +3,7 @@ package pin
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -228,5 +229,71 @@ func TestScheduler_StartStopRunsBackgroundLoopAndExitsCleanly(t *testing.T) {
 
 	if _, err := s.GetToolPin(ctx, "jira", "search_docs"); err != nil {
 		t.Fatalf("GetToolPin after background loop ran: %v", err)
+	}
+}
+
+// TestScheduler_RunOnceDoesNotHangOnAHungFetch guards against a real
+// shutdown-deadlock risk Copilot's review flagged on PR #10:
+// RunOnce used to call Fetch with context.Background(), so a hung
+// Fetcher implementation would block the loop goroutine forever --
+// Stop() would then deadlock waiting on done, and a hung node would
+// delay every subsequent node's refresh in the same tick. A short
+// FetchTimeout should bound each node's own fetch, letting RunOnce
+// (and therefore the whole tick) complete regardless.
+func TestScheduler_RunOnceDoesNotHangOnAHungFetch(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	ctx := context.Background()
+	clock := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+
+	var secondNodeFetched atomic.Bool
+	fetch := func(ctx context.Context, node string) ([]ToolDef, error) {
+		if node == "hung-node" {
+			<-ctx.Done() // never returns on its own -- only when the fetch context times out
+			return nil, ctx.Err()
+		}
+		secondNodeFetched.Store(true)
+		return []ToolDef{{Name: "search_docs", Description: "d", InputSchema: []byte(`{}`)}}, nil
+	}
+
+	sched := NewScheduler(SchedulerConfig{
+		Registry:        reg,
+		Fetch:           fetch,
+		Nodes:           []string{"hung-node", "second-node"},
+		DefaultInterval: 5 * time.Minute,
+		FetchTimeout:    20 * time.Millisecond,
+		Clock:           clock.now,
+	})
+
+	done := make(chan struct{})
+	go func() {
+		sched.RunOnce(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunOnce hung on a node whose Fetch never returns on its own -- FetchTimeout did not bound it")
+	}
+
+	if !secondNodeFetched.Load() {
+		t.Fatal("the second node's Fetch was never reached -- the hung first node blocked the rest of this tick")
+	}
+}
+
+// TestScheduler_DefaultFetchTimeoutAppliedWhenUnset confirms
+// NewScheduler falls back to DefaultFetchTimeout rather than leaving
+// fetches unbounded when SchedulerConfig.FetchTimeout is zero (the
+// real-world default -- most callers won't set this explicitly).
+func TestScheduler_DefaultFetchTimeoutAppliedWhenUnset(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	sched := NewScheduler(SchedulerConfig{
+		Registry:        reg,
+		Fetch:           func(ctx context.Context, node string) ([]ToolDef, error) { return nil, nil },
+		Nodes:           []string{"jira"},
+		DefaultInterval: time.Minute,
+	})
+	if sched.fetchTimeout != DefaultFetchTimeout {
+		t.Fatalf("fetchTimeout = %v, want DefaultFetchTimeout (%v) when unset", sched.fetchTimeout, DefaultFetchTimeout)
 	}
 }

@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,53 @@ func TestPIIScanner_RedactionWinsOverFlagWhenBothPresent(t *testing.T) {
 	_, v := NewPIIScanner(PIIConfig{DetectEmail: true}).ScanResponse(body)
 	if v.Action != Redact {
 		t.Fatalf("expected redact to win over flag, got %s", v.Action)
+	}
+}
+
+// TestPIIScanner_DoesNotCorruptInvalidUTF8BytesElsewhereInBody documents
+// the byte-preservation invariant ReplaceAllFunc-based redaction relies
+// on: bytes elsewhere in the body that aren't part of the actual match
+// must survive untouched, even if they're not valid UTF-8 on their
+// own. (Copilot's review on PR #12 raised this as a risk with the
+// previous whole-body string-conversion approach; verified directly
+// that a bare string([]byte)/[]byte(string) round-trip in Go doesn't
+// actually corrupt invalid UTF-8 -- the real wins from this change are
+// avoiding a per-match whole-body reallocation and matching
+// SecretScanner's own byte-preserving pattern instead of diverging
+// from it. Kept as a real regression guard for the invariant either
+// way, not because the old code was proven broken here.)
+func TestPIIScanner_DoesNotCorruptInvalidUTF8BytesElsewhereInBody(t *testing.T) {
+	invalidUTF8 := []byte{0xff, 0xfe, 0xfd} // never valid UTF-8 on their own
+	body := append(append([]byte(`{"text":"SSN 123-45-6789 `), invalidUTF8...), []byte(`"}`)...)
+
+	out, v := NewPIIScanner(PIIConfig{}).ScanResponse(body)
+	if v.Action != Redact {
+		t.Fatalf("expected redact, got %s", v.Action)
+	}
+	if !bytes.Contains(out, invalidUTF8) {
+		t.Fatalf("invalid-UTF-8 bytes elsewhere in the body were corrupted by redaction: %q", out)
+	}
+	if bytes.Contains(out, []byte("123-45-6789")) {
+		t.Fatalf("SSN not redacted: %q", out)
+	}
+}
+
+// TestPIIScanner_RedactsAllOccurrencesOfARepeatedSSN guards the same
+// fix from a different angle: ReplaceAllFunc naturally handles every
+// match in one pass, unlike the old per-match strings.Replace(...,1)
+// loop, which happened to work for duplicates only by coincidence of
+// iterating once per FindAll match.
+func TestPIIScanner_RedactsAllOccurrencesOfARepeatedSSN(t *testing.T) {
+	body := []byte(`{"text":"123-45-6789 appears twice: 123-45-6789"}`)
+	out, v := NewPIIScanner(PIIConfig{}).ScanResponse(body)
+	if v.Action != Redact {
+		t.Fatalf("expected redact, got %s", v.Action)
+	}
+	if strings.Contains(string(out), "123-45-6789") {
+		t.Fatalf("a repeated SSN was not fully redacted: %s", out)
+	}
+	if strings.Count(string(out), "[REDACTED:ssn]") != 2 {
+		t.Fatalf("expected both occurrences redacted, got: %s", out)
 	}
 }
 
