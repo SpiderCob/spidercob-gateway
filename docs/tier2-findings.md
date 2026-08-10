@@ -48,20 +48,21 @@ Status legend: `[ ]` open, `[x]` fixed (with the PR that fixed it).
   (401) instead of another `server_error`. (orig. PR #6) — fixed.
 
 ### Group B — HTTP status code correctness
-- [ ] `internal/adminapi/introspect.go` `HTTPIntrospector` — returns a
+- [x] `internal/adminapi/introspect.go` `HTTPIntrospector` — returns a
   generic error for any non-200 response, so an invalid/expired human
   session (401/403) looks identical to spider-snoop being unreachable.
-  (orig. PR #14)
-- [ ] `internal/adminapi/routes.go` `Gate` — maps all introspection errors
+  (orig. PR #14) — fixed via `ErrInvalidSession`.
+- [x] `internal/adminapi/routes.go` `Gate` — maps all introspection errors
   to 503, including the 401/403 case above; should be a client 401.
-  (orig. PR #14)
-- [ ] `internal/adminapi/routes.go` `deleteNode` — maps all `DeleteNode`
+  (orig. PR #14) — fixed.
+- [x] `internal/adminapi/routes.go` `deleteNode` — maps all `DeleteNode`
   errors to 500; a concurrent delete (`ErrNotFound`) should be 404 like
-  other delete endpoints. (orig. PR #16)
-- [ ] `internal/adminapi/routes.go` — an invalid/expired UI-session cookie
+  other delete endpoints. (orig. PR #16) — fixed.
+- [x] `internal/adminapi/routes.go` — an invalid/expired UI-session cookie
   falls through to the service-to-service gate, producing a misleading
   "missing or malformed Authorization header" error for browser callers
-  instead of a UI-session-specific 401. (orig. PR #18)
+  instead of a UI-session-specific 401. (orig. PR #18) — fixed: falls
+  through only when an Authorization header is actually present.
 
 ### Group C — data hygiene / UX correctness
 - [ ] `internal/store/sqlite.go` `ListAgents` — selects/scans `secret_hash`

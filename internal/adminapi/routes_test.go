@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -110,6 +111,18 @@ func TestGate_IntrospectionErrorFailsClosed(t *testing.T) {
 	rec := fullyAuthedRequest(api, "GET", "/admin/agents", nil)
 	if rec.Code != 503 {
 		t.Fatalf("status = %d, want 503 (fail closed on introspection error), body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGate_InvalidSessionRejectedAsUnauthorizedNotServiceUnavailable(t *testing.T) {
+	// A definite "spider-snoop rejected this human token" (ErrInvalidSession)
+	// is a client error, not a service outage -- must map to 401, not the
+	// generic fail-closed 503 an unreachable/erroring spider-snoop gets.
+	introspector := &fakeIntrospector{err: fmt.Errorf("wrapped: %w", ErrInvalidSession)}
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), introspector)
+	rec := fullyAuthedRequest(api, "GET", "/admin/agents", nil)
+	if rec.Code != 401 {
+		t.Fatalf("status = %d, want 401 for an invalid/expired human session, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -566,6 +579,46 @@ func TestDeleteNode_ConfigSourced_Rejected(t *testing.T) {
 	}
 	if _, err := s.GetNodeByName(context.Background(), "jira"); err != nil {
 		t.Fatalf("config-sourced node must still exist after a refused delete: %v", err)
+	}
+}
+
+// raceDeleteNodeStore wraps a real store.Store and forces DeleteNode to
+// return a caller-chosen error, simulating a node that was deleted by a
+// concurrent request in the window between deleteNode's own GetNodeByName
+// existence check and its DeleteNode call.
+type raceDeleteNodeStore struct {
+	store.Store
+	deleteNodeErr error
+}
+
+func (s *raceDeleteNodeStore) DeleteNode(ctx context.Context, name string) error {
+	if s.deleteNodeErr != nil {
+		return s.deleteNodeErr
+	}
+	return s.Store.DeleteNode(ctx, name)
+}
+
+func TestDeleteNode_ConcurrentlyDeletedNodeReturns404NotInternalError(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.CreateNode(context.Background(), store.Node{Name: "throwaway", Transport: "streamable_http", UpstreamURL: strPtrForTest("http://a"), Source: store.NodeSourceAdmin}); err != nil {
+		t.Fatalf("CreateNode: %v", err)
+	}
+	raced := &raceDeleteNodeStore{Store: s, deleteNodeErr: store.ErrNotFound}
+
+	svc := identity.NewService(s)
+	sessions := uisession.NewRegistry(uisession.RegistryConfig{MaxAge: time.Hour})
+	api, err := New(Config{Store: raced, Identity: svc, Authn: validAdminAuthn(), Introspector: adminIntrospector(), UISessions: sessions})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/nodes/throwaway", nil)
+	if rec.Code != 404 {
+		t.Fatalf("status = %d, want 404 (consistent with other delete endpoints on a concurrent delete), body = %s", rec.Code, rec.Body.String())
 	}
 }
 

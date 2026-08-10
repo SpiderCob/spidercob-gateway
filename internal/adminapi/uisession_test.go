@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -270,6 +271,30 @@ func TestCookieAuth_InvalidCookieAndNoNHITokenRejected(t *testing.T) {
 	rec := doRawRequest(api, "GET", "/admin/agents", nil, &http.Cookie{Name: UISessionCookieName, Value: "garbage"})
 	if rec.Code != 401 {
 		t.Fatalf("status = %d, want 401, body = %s", rec.Code, rec.Body.String())
+	}
+	// A browser caller (no Authorization header at all) with only an
+	// invalid/expired cookie must get a UI-session-specific error, not
+	// the service-to-service gate's "missing or malformed Authorization
+	// header" message -- that would misdescribe what's actually wrong.
+	if strings.Contains(rec.Body.String(), "Authorization header") {
+		t.Fatalf("expected a UI-session-specific error, got the service-to-service gate's message: %s", rec.Body.String())
+	}
+}
+
+func TestCookieAuth_StaleCookieWithValidNHIStillFallsThroughToServiceGate(t *testing.T) {
+	// A service-to-service caller that also happens to carry a stale
+	// leftover cookie must not be hard-rejected on the cookie alone -- it
+	// should still fall through to (and succeed via) the ordinary
+	// NHI-token-plus-header gate.
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	req := httptest.NewRequest("GET", "/admin/agents", nil)
+	req.AddCookie(&http.Cookie{Name: UISessionCookieName, Value: "garbage"})
+	req.Header.Set("Authorization", "Bearer nhi-token")
+	req.Header.Set(HumanSessionHeader, "human-token")
+	rec := httptest.NewRecorder()
+	api.Routes().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (fall through to service gate), body = %s", rec.Code, rec.Body.String())
 	}
 }
 

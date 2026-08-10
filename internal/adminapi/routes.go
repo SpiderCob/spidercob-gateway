@@ -161,7 +161,13 @@ func (a *AdminAPI) gate(next http.HandlerFunc) http.HandlerFunc {
 		}
 		result, err := a.introspector.Introspect(r.Context(), humanToken)
 		if err != nil {
-			// Fail closed on an introspection error (spider-snoop
+			if errors.Is(err, ErrInvalidSession) {
+				// spider-snoop explicitly rejected this human token -- a
+				// client auth failure, not a service outage.
+				writeAdminError(w, http.StatusUnauthorized, "invalid or expired admin session")
+				return
+			}
+			// Fail closed on any other introspection error (spider-snoop
 			// unreachable, timed out, or returned something unexpected)
 			// -- never treat "we couldn't check" as "it's fine."
 			writeAdminError(w, http.StatusServiceUnavailable, "failed to verify admin session")
@@ -196,6 +202,20 @@ func (a *AdminAPI) gateBrowserOrService(next http.HandlerFunc) http.HandlerFunc 
 				next(w, r.WithContext(context.WithValue(r.Context(), adminIdentityCtxKey{}, ident)))
 				return
 			}
+			if r.Header.Get("Authorization") == "" {
+				// A browser caller (no NHI bearer token at all): an
+				// invalid/expired UI-session cookie is the whole story,
+				// so say so directly instead of falling through to the
+				// service-to-service gate, whose "missing or malformed
+				// Authorization header" message would misdescribe what's
+				// actually wrong here.
+				writeAdminError(w, http.StatusUnauthorized, "invalid or expired UI session")
+				return
+			}
+			// An Authorization header is present too -- this may be a
+			// service-to-service caller that also happens to carry a
+			// stale leftover cookie; fall through to the ordinary gate
+			// rather than failing on the cookie alone.
 		}
 		a.gate(next)(w, r)
 	}
@@ -682,6 +702,13 @@ func (a *AdminAPI) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.store.DeleteNode(r.Context(), name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Deleted by a concurrent request in the window since the
+			// existence check above -- same outcome a request that never
+			// found it in the first place gets.
+			writeAdminError(w, http.StatusNotFound, "node not found")
+			return
+		}
 		writeAdminError(w, http.StatusInternalServerError, "failed to delete node")
 		return
 	}
