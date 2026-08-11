@@ -197,3 +197,25 @@ export function listAuditRecords(limit?: number, beforeID?: number): Promise<Aud
   const qs = params.toString()
   return request<AuditRecord[]>('GET', `/admin/audit${qs ? `?${qs}` : ''}`)
 }
+
+// --- Sessions (issue #35, kill-session) ---
+//
+// A live, traffic-facing view -- read straight from the running gateway
+// process, not stored -- deliberately distinct from the session/whoami
+// endpoints above, which are about *this browser's own admin-UI login*,
+// not the MCP sessions clients actually use the gateway for.
+
+export interface Session {
+  id: string
+  node: string
+  principal: string
+  idle_since: string
+}
+
+export function listSessions(): Promise<Session[]> {
+  return request<Session[]>('GET', '/admin/sessions')
+}
+
+export function killSession(id: string): Promise<void> {
+  return request<void>('DELETE', `/admin/sessions/${encodeURIComponent(id)}`)
+}

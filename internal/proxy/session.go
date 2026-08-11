@@ -39,6 +39,13 @@ type mcpSession struct {
 	id       string
 	node     string
 	upstream sessionUpstream
+	// principal is the "user:<username>"/"agent:<client_id>" identity
+	// (AuthClaims.Subject) that authenticated the initialize call which
+	// created this session -- set once at create time, never mutated
+	// afterward, so it needs no locking of its own. Exists so an admin
+	// (issue #35, kill-session) can tell whose session they'd be
+	// interrupting before ending it.
+	principal string
 
 	mu         sync.Mutex
 	lastActive time.Time
@@ -90,12 +97,14 @@ func newSessionManager(idleTimeout time.Duration) *sessionManager {
 
 // create mints a new opaque, cryptographically random session ID -- never
 // the upstream's own session identifier -- and registers the mapping.
-func (m *sessionManager) create(node string, upstream sessionUpstream) (*mcpSession, error) {
+// principal is the authenticated identity (AuthClaims.Subject) that
+// established this session, recorded for admin visibility (issue #35).
+func (m *sessionManager) create(node, principal string, upstream sessionUpstream) (*mcpSession, error) {
 	id, err := newSessionID()
 	if err != nil {
 		return nil, fmt.Errorf("mint session id: %w", err)
 	}
-	s := &mcpSession{id: id, node: node, upstream: upstream, lastActive: time.Now()}
+	s := &mcpSession{id: id, node: node, principal: principal, upstream: upstream, lastActive: time.Now()}
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
@@ -124,6 +133,42 @@ func (m *sessionManager) touch(id string) {
 	if s, ok := m.get(id); ok {
 		s.touch()
 	}
+}
+
+// SessionInfo is a point-in-time snapshot of one live session, exposed
+// for admin visibility (issue #35, kill-session) -- deliberately not
+// *mcpSession itself, so a caller outside this package can't reach into
+// its locks or its upstream.
+type SessionInfo struct {
+	ID        string
+	Node      string
+	Principal string
+	IdleSince time.Time
+}
+
+// list returns a snapshot of every currently live session -- "live"
+// meaning present in the map and not already ending, the same notion of
+// liveness get() already uses.
+func (m *sessionManager) list() []SessionInfo {
+	m.mu.Lock()
+	sessions := make([]*mcpSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+
+	out := make([]SessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		s.mu.Lock()
+		ending := s.ending
+		lastActive := s.lastActive
+		s.mu.Unlock()
+		if ending {
+			continue
+		}
+		out = append(out, SessionInfo{ID: s.id, Node: s.node, Principal: s.principal, IdleSince: lastActive})
+	}
+	return out
 }
 
 // allIDs returns every currently live session ID -- used to tear everything

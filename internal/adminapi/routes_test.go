@@ -44,7 +44,7 @@ func newTestAdminAPI(t *testing.T, authn AdminTokenValidator, introspector Spide
 	t.Cleanup(func() { _ = s.Close() })
 	svc := identity.NewService(s)
 	sessions := uisession.NewRegistry(uisession.RegistryConfig{MaxAge: time.Hour})
-	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector, UISessions: sessions})
+	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector, UISessions: sessions, MCPSessions: newFakeMCPSessionManager()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestDeleteNode_ConcurrentlyDeletedNodeReturns404NotInternalError(t *testing
 
 	svc := identity.NewService(s)
 	sessions := uisession.NewRegistry(uisession.RegistryConfig{MaxAge: time.Hour})
-	api, err := New(Config{Store: raced, Identity: svc, Authn: validAdminAuthn(), Introspector: adminIntrospector(), UISessions: sessions})
+	api, err := New(Config{Store: raced, Identity: svc, Authn: validAdminAuthn(), Introspector: adminIntrospector(), UISessions: sessions, MCPSessions: newFakeMCPSessionManager()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

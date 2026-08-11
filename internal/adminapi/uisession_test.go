@@ -30,7 +30,7 @@ func newTestAdminAPIWithSessions(t *testing.T, authn AdminTokenValidator, intros
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	svc := identity.NewService(s)
-	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector, UISessions: sessions})
+	api, err := New(Config{Store: s, Identity: svc, Authn: authn, Introspector: introspector, UISessions: sessions, MCPSessions: newFakeMCPSessionManager()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -50,6 +50,32 @@ func (a adminAuthValidator) ValidateAdminAccessToken(token string) (adminapi.Adm
 	return adminapi.AdminClaims{Subject: c.Subject}, nil
 }
 
+// adminMCPSessionManager adapts *proxy.Gateway to adminapi.MCPSessionManager
+// (issue #35, kill-session) -- same pattern as authValidator/
+// adminAuthValidator: proxy.SessionInfo and adminapi.SessionInfo are
+// deliberately distinct types (neither package imports the other), so this
+// composition root converts between them, and translates
+// proxy.ErrSessionNotFound into adminapi's own sentinel the same way a
+// shared error identity would otherwise have required a shared import.
+type adminMCPSessionManager struct{ gw *proxy.Gateway }
+
+func (a adminMCPSessionManager) ListSessions() []adminapi.SessionInfo {
+	sessions := a.gw.ListSessions()
+	out := make([]adminapi.SessionInfo, len(sessions))
+	for i, s := range sessions {
+		out[i] = adminapi.SessionInfo{ID: s.ID, Node: s.Node, Principal: s.Principal, IdleSince: s.IdleSince}
+	}
+	return out
+}
+
+func (a adminMCPSessionManager) EndSession(ctx context.Context, id string) error {
+	err := a.gw.EndSession(ctx, id)
+	if errors.Is(err, proxy.ErrSessionNotFound) {
+		return adminapi.ErrSessionNotFound
+	}
+	return err
+}
+
 // getOrCreateGroup resolves a group by name, creating it if it doesn't
 // already exist -- both SeedAgents.Groups and Policies reference groups by
 // name, auto-created rather than requiring a separate bootstrap step.
@@ -349,6 +375,7 @@ func main() {
 			Authn:        adminAuthValidator{as: as},
 			Introspector: introspector,
 			UISessions:   uiSessions,
+			MCPSessions:  adminMCPSessionManager{gw: gw},
 		})
 		if err != nil {
 			slog.Error("failed to build adminapi", "err", err)
