@@ -23,11 +23,11 @@ func (u *fakeUpstream) teardown(context.Context) error {
 
 func TestSessionManager_CreateAssignsUniqueIDs(t *testing.T) {
 	m := newSessionManager(time.Hour)
-	s1, err := m.create("jira", &fakeUpstream{})
+	s1, err := m.create("jira", "agent:test-agent", &fakeUpstream{})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	s2, err := m.create("jira", &fakeUpstream{})
+	s2, err := m.create("jira", "agent:test-agent", &fakeUpstream{})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestSessionManager_CreateAssignsUniqueIDs(t *testing.T) {
 
 func TestSessionManager_GetReturnsWhatWasCreated(t *testing.T) {
 	m := newSessionManager(time.Hour)
-	created, err := m.create("jira", &fakeUpstream{})
+	created, err := m.create("jira", "agent:test-agent", &fakeUpstream{})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -51,6 +51,61 @@ func TestSessionManager_GetReturnsWhatWasCreated(t *testing.T) {
 	}
 	if got.node != "jira" {
 		t.Fatalf("node = %q, want jira", got.node)
+	}
+	if got.principal != "agent:test-agent" {
+		t.Fatalf("principal = %q, want agent:test-agent", got.principal)
+	}
+}
+
+func TestSessionManager_ListReturnsLiveSessionsWithPrincipalAndNode(t *testing.T) {
+	m := newSessionManager(time.Hour)
+	s1, err := m.create("jira", "agent:ci-bot", &fakeUpstream{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	s2, err := m.create("slack", "user:alice", &fakeUpstream{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	got := m.list()
+	if len(got) != 2 {
+		t.Fatalf("list() = %+v, want 2 sessions", got)
+	}
+	byID := make(map[string]SessionInfo, len(got))
+	for _, si := range got {
+		byID[si.ID] = si
+	}
+	if si, ok := byID[s1.id]; !ok || si.Node != "jira" || si.Principal != "agent:ci-bot" {
+		t.Fatalf("session 1 = %+v, want node=jira principal=agent:ci-bot", si)
+	}
+	if si, ok := byID[s2.id]; !ok || si.Node != "slack" || si.Principal != "user:alice" {
+		t.Fatalf("session 2 = %+v, want node=slack principal=user:alice", si)
+	}
+}
+
+func TestSessionManager_ListExcludesEndedSessions(t *testing.T) {
+	m := newSessionManager(time.Hour)
+	up := &fakeUpstream{}
+	s, err := m.create("jira", "agent:ci-bot", up)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := m.end(context.Background(), s.id); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+
+	got := m.list()
+	if len(got) != 0 {
+		t.Fatalf("list() after end = %+v, want empty", got)
+	}
+}
+
+func TestSessionManager_ListOnEmptyManagerReturnsEmptyNotNil(t *testing.T) {
+	m := newSessionManager(time.Hour)
+	got := m.list()
+	if len(got) != 0 {
+		t.Fatalf("list() on empty manager = %+v, want empty", got)
 	}
 }
 
@@ -64,7 +119,7 @@ func TestSessionManager_GetUnknownIDFails(t *testing.T) {
 func TestSessionManager_EndTearsDownUpstreamAndRemovesMapping(t *testing.T) {
 	m := newSessionManager(time.Hour)
 	up := &fakeUpstream{}
-	s, err := m.create("jira", up)
+	s, err := m.create("jira", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -93,7 +148,7 @@ func TestSessionManager_EndIsIdempotent(t *testing.T) {
 	// silently re-creatable or double-torn-down by a second end() call.
 	m := newSessionManager(time.Hour)
 	up := &fakeUpstream{}
-	s, err := m.create("jira", up)
+	s, err := m.create("jira", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -146,11 +201,11 @@ func TestSessionManager_ReapIdle_RemovesAllExpiredFromMapBeforeAnyTeardownRuns(t
 	release := make(chan struct{})
 	up1 := newBlockingUpstream(release)
 	up2 := newBlockingUpstream(release)
-	s1, err := m.create("jira", up1)
+	s1, err := m.create("jira", "agent:test-agent", up1)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	s2, err := m.create("jira", up2)
+	s2, err := m.create("jira", "agent:test-agent", up2)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -215,7 +270,7 @@ func TestSessionManager_EndIsRetryableAfterTeardownFailure(t *testing.T) {
 	// stdio child process) could leak with no way to reach it again.
 	m := newSessionManager(time.Hour)
 	up := &failThenSucceedUpstream{fail: true}
-	s, err := m.create("jira", up)
+	s, err := m.create("jira", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -273,7 +328,7 @@ func TestSessionManager_EndCompletesWhenUpstreamConfirmsAlreadyGone(t *testing.T
 	// whatever teardown() itself returns.
 	m := newSessionManager(time.Hour)
 	up := &deadUpstream{teardownErr: errors.New("exit status 1")}
-	s, err := m.create("crash", up)
+	s, err := m.create("crash", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -310,7 +365,7 @@ func TestSessionManager_ReapIdleRequeuesStillAliveSessionOnTeardownFailure(t *te
 	// reachable for a retry (next reapIdle pass, or an explicit end()).
 	m := newSessionManager(10 * time.Millisecond)
 	up := &stuckUpstream{failUntilCall: 1}
-	s, err := m.create("jira", up)
+	s, err := m.create("jira", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -338,7 +393,7 @@ func TestSessionManager_ReapIdleRequeuesStillAliveSessionOnTeardownFailure(t *te
 func TestSessionManager_ReapIdleRemovesOnlyExpiredSessions(t *testing.T) {
 	m := newSessionManager(10 * time.Millisecond)
 	staleUp := &fakeUpstream{}
-	stale, err := m.create("jira", staleUp)
+	stale, err := m.create("jira", "agent:test-agent", staleUp)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -346,7 +401,7 @@ func TestSessionManager_ReapIdleRemovesOnlyExpiredSessions(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	freshUp := &fakeUpstream{}
-	fresh, err := m.create("jira", freshUp)
+	fresh, err := m.create("jira", "agent:test-agent", freshUp)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -370,7 +425,7 @@ func TestSessionManager_ReapIdleRemovesOnlyExpiredSessions(t *testing.T) {
 func TestSessionManager_TouchExtendsIdleDeadline(t *testing.T) {
 	m := newSessionManager(20 * time.Millisecond)
 	up := &fakeUpstream{}
-	s, err := m.create("jira", up)
+	s, err := m.create("jira", "agent:test-agent", up)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

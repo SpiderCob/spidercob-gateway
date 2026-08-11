@@ -62,6 +62,11 @@ type Config struct {
 	// Authn/Introspector's existing service-to-service dual-trust gate,
 	// not a replacement for it. See internal/uisession's package doc.
 	UISessions *uisession.Registry
+	// MCPSessions backs GET/DELETE /admin/sessions (issue #35,
+	// kill-session) -- deliberately distinct from UISessions: this is the
+	// gateway's live, traffic-facing MCP session state, not the browser
+	// admin-UI login concept.
+	MCPSessions MCPSessionManager
 }
 
 // AdminAPI serves the gateway's HTTP admin surface (issue #13).
@@ -71,12 +76,13 @@ type AdminAPI struct {
 	authn        AdminTokenValidator
 	introspector SpiderSnoopIntrospector
 	uiSessions   *uisession.Registry
+	mcpSessions  MCPSessionManager
 }
 
 // New builds an AdminAPI from cfg.
 func New(cfg Config) (*AdminAPI, error) {
-	if cfg.Store == nil || cfg.Identity == nil || cfg.Authn == nil || cfg.Introspector == nil || cfg.UISessions == nil {
-		return nil, fmt.Errorf("adminapi: Store, Identity, Authn, Introspector, and UISessions are all required")
+	if cfg.Store == nil || cfg.Identity == nil || cfg.Authn == nil || cfg.Introspector == nil || cfg.UISessions == nil || cfg.MCPSessions == nil {
+		return nil, fmt.Errorf("adminapi: Store, Identity, Authn, Introspector, UISessions, and MCPSessions are all required")
 	}
 	return &AdminAPI{
 		store:        cfg.Store,
@@ -84,6 +90,7 @@ func New(cfg Config) (*AdminAPI, error) {
 		authn:        cfg.Authn,
 		introspector: cfg.Introspector,
 		uiSessions:   cfg.UISessions,
+		mcpSessions:  cfg.MCPSessions,
 	}, nil
 }
 
@@ -124,6 +131,13 @@ func (a *AdminAPI) Routes() http.Handler {
 	// launch, since the admin UI's Audit screen needs the cookie path
 	// to work immediately.
 	mux.HandleFunc("GET /admin/audit", a.gateBrowserOrService(a.listAudit))
+
+	// Sessions (issue #35, kill-session): a live, traffic-facing view --
+	// not stored, read straight from the running gateway process --
+	// so both routes accept either credential shape from the start, same
+	// reasoning Audit's own read-heavy endpoint already established.
+	mux.HandleFunc("GET /admin/sessions", a.gateBrowserOrService(a.listSessions))
+	mux.HandleFunc("DELETE /admin/sessions/{id}", a.gateBrowserOrService(a.killSession))
 
 	// UI session lifecycle (issue #17) -- these three are the login/
 	// whoami/logout surface itself, so none of them sit behind either

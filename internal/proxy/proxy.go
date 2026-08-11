@@ -436,7 +436,8 @@ func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *n
 		}
 		return
 	}
-	sess, err := g.sessions.create(nc.name, upstream)
+	claims, _ := AuthClaimsFromContext(r.Context()) // always present -- authenticate() already ran before this is reached
+	sess, err := g.sessions.create(nc.name, claims.Subject, upstream)
 	if err != nil {
 		_ = upstream.teardown(r.Context())
 		http.Error(w, "internal error", http.StatusInternalServerError)
