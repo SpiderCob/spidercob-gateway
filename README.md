@@ -77,7 +77,9 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 4c-3: CSV bulk user import — `config.json`'s `seed_users_csv_path`, idempotent (create-if-missing, never resets an existing password), for standalone (no spider-snoop) deployments
 - [x] Phase 4c-4: `internal/audit` core — hash-chained, append-only, wired into admin-API actions
 - [x] Phase 4c-5: audit viewer — `GET /admin/audit` (paginated, both credential shapes from day one) + the admin UI's fifth screen; chain verification itself stays off the HTTP surface
-- [ ] Phase 4c-6+: kill-session, config-snippet generator, docker packaging → **OSS launch**
+- [x] Phase 4c-6: kill-session — `GET/DELETE /admin/sessions`, sixth admin UI screen
+- [x] Phase 4c-7: config-snippet generator — real, ready-to-paste MCP client config at agent-creation time
+- [ ] Phase 4c-8: docker packaging (spec'd, [issue #39](https://github.com/SpiderCob/spidercob-gateway/issues/39)) → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
