@@ -1,0 +1,14 @@
+# Keeps the build context small and fast, and keeps things that don't
+# belong in an image layer (a real config, a real local db, a stale local
+# frontend build) out of it entirely (issue #39). internal/webui/dist is
+# excluded even though it's needed at build time -- the Dockerfile's own
+# web stage rebuilds it fresh from web/'s source inside the image, so a
+# possibly-stale local build must never be silently copied in instead.
+.git
+web/node_modules
+internal/webui/dist
+*.db
+*.db-shm
+*.db-wal
+config.json
+/spidercob

@@ -1,0 +1,18 @@
+# The real "docker compose up" quickstart README.md's own pitch already
+# promises (issue #39) -- distinct from deploy/docker-compose.yml, which
+# is a separate thing entirely: the Keycloak ID-JAG interop test harness
+# (automation/run-e2e-idjag.sh / `make ci-interop`), not a deployment
+# artifact. Don't conflate the two.
+#
+# Needs ./config.json to already exist -- see README.md's Quickstart for
+# the (unchanged) steps to produce one from config.example.json. By
+# default the identity database lives inside the container at its
+# default path and won't survive a `docker compose down`; set
+# store_db_path in config.json to somewhere under a volume you mount
+# yourself if you need it to persist.
+services:
+  gateway:
+    build:
+      context: .
+    ports: ["8080:8080"]
+    volumes: ["./config.json:/config.json:ro"]

@@ -1,4 +1,4 @@
-.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes e2e-seed-users e2e-audit ci ci-interop run docker
+.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes e2e-seed-users e2e-audit e2e-docker ci ci-interop ci-docker run docker
 
 # web builds the admin UI's static assets into internal/webui/dist
 # (issue #17) -- required before `go build`/`go vet`/`go test ./...`
@@ -47,11 +47,17 @@ e2e-seed-users:
 e2e-audit:
 	./automation/run-e2e-audit.sh
 
+e2e-docker:
+	./automation/run-e2e-docker.sh
+
 ci: web ## fast suite + real end-to-end validation -- run before opening a PR (builds the admin UI first, issue #17)
 	./automation/run-all.sh
 
 ci-interop: ## real Keycloak ID-JAG interop (issue #5) -- needs Docker; required before a Phase 2b PR, separate from `ci` since not every environment has Docker
 	./automation/run-e2e-idjag.sh
+
+ci-docker: ## real production Docker image build + run (issue #39) -- needs Docker; separate from ci-interop, which tests Keycloak protocol interop, not this repo's own packaged artifact
+	./automation/run-e2e-docker.sh
 
 run: build
 	./spidercob -config config.json
