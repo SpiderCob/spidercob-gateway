@@ -50,3 +50,52 @@ nav button.active {
   border-bottom-color: currentColor;
   font-weight: 600;
 }
+
+/* Policy matrix (issue #41) -- a groups x nodes grid, read-only, wide
+   enough with more than a few nodes that it needs to scroll within its
+   own container rather than breaking the page layout. */
+.matrix-scroll {
+  overflow-x: auto;
+}
+
+.matrix-scroll table {
+  width: auto;
+  min-width: 100%;
+}
+
+td.cell-no-rule {
+  color: var(--border);
+  text-align: center;
+}
+
+td.cell-allowed {
+  background: var(--success-bg);
+  color: var(--success);
+  text-align: center;
+  cursor: pointer;
+}
+
+td.cell-denied {
+  background: var(--error-bg);
+  color: var(--error);
+  text-align: center;
+  cursor: pointer;
+}
+
+td.cell-restricted {
+  background: var(--warning-bg);
+  color: var(--warning);
+  text-align: center;
+  cursor: pointer;
+}
+
+.matrix-cell-detail {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+
+.matrix-cell-detail h4 {
+  margin-top: 0;
+}
