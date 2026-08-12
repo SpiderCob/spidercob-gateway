@@ -219,3 +219,43 @@ export function listSessions(): Promise<Session[]> {
 export function killSession(id: string): Promise<void> {
   return request<void>('DELETE', `/admin/sessions/${encodeURIComponent(id)}`)
 }
+
+// --- Config snippet generator (issue #37) ---
+//
+// mintNodeToken calls the gateway's own public POST /token endpoint
+// directly -- the exact same client_credentials grant every NHI agent
+// already authenticates with, invoked here with a client_id/secret pair
+// the browser already holds in memory from a just-completed createAgent
+// response. Deliberately NOT routed through request() above: /token is
+// form-urlencoded and cookie-free (client_credentials needs no prior
+// admin session -- the secret itself is the credential), and its error
+// shape is the OAuth-standard {error, error_description}, not adminapi's
+// {error: {message}}.
+
+export interface MintedToken {
+  access_token: string
+  expires_in: number
+}
+
+export async function mintNodeToken(clientId: string, clientSecret: string, node: string): Promise<MintedToken> {
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+    resource: node,
+  })
+  const res = await fetch('/token', { method: 'POST', body })
+
+  let parsed: { access_token?: string; expires_in?: number; error?: string; error_description?: string } = {}
+  try {
+    parsed = await res.json()
+  } catch {
+    // Response body wasn't JSON (or was empty) -- fall back to the
+    // generic message below rather than failing the error path itself.
+  }
+  if (!res.ok || !parsed.access_token) {
+    const message = parsed.error_description || parsed.error || `failed to mint a token (status ${res.status})`
+    throw new ApiError(res.status, message)
+  }
+  return { access_token: parsed.access_token, expires_in: parsed.expires_in ?? 0 }
+}
