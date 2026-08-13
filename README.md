@@ -12,6 +12,16 @@ Non-human identities (agents, service accounts) outnumber humans ~100:1 in most 
 - **Small-team-shaped:** `docker compose up`, point `config.json` at a CSV of users and your policy rules. Target: protected MCPs in 15 minutes.
 - **Security data path:** outbound secret/PII redaction (Luhn-checked cards, plausibility-filtered SSNs, entropy-based unknown-secret detection), response-embedded injection detection (homoglyph/zero-width evasion resistant), inbound schema enforcement against each tool's pinned `inputSchema`, tool pinning (TOFU + background drift detection), hash-chained audit covering both admin actions and every proxied MCP request.
 
+## Installing a release
+
+Every `v*` tag publishes signed, cross-platform binaries (`linux`/`darwin`
+× `amd64`/`arm64`) to the [Releases page](https://github.com/SpiderCob/spidercob-gateway/releases),
+signed keylessly via Sigstore/cosign — see [docs/verify-release.md](docs/verify-release.md)
+for how to verify a download actually came from this project's own CI.
+`brew install SpiderCob/tap/spidercob-gateway` becomes available the same
+way, once the first tagged release exists. No release has been tagged
+yet — the sections below are how to run the gateway until then.
+
 ## Quickstart (current skeleton)
 
 Every request needs a real bearer token, and by default `policy` denies everything until you actually grant access. `config.json` is still the quickest path for a first run; agents/groups/policies/nodes can now also be managed from `/ui/` once the admin API is enabled, not just `config.json` — though a node registered from the UI still needs a gateway restart before it actually routes traffic (no hot-reload yet; the UI tells you this explicitly right after you register one). This mints an NHI credential, grants it access to one node, and calls through the gateway with it:

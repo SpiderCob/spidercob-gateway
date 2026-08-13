@@ -1,4 +1,4 @@
-.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes e2e-seed-users e2e-audit e2e-mcp-audit e2e-docker e2e-standalone-admin ci ci-interop ci-docker run docker
+.PHONY: build web test e2e e2e-idjag e2e-pin e2e-schema e2e-adminapi e2e-nodes e2e-adminui-session e2e-adminui-nodes e2e-seed-users e2e-audit e2e-mcp-audit e2e-docker e2e-standalone-admin e2e-release ci ci-interop ci-docker run docker
 
 # web builds the admin UI's static assets into internal/webui/dist
 # (issue #17) -- required before `go build`/`go vet`/`go test ./...`
@@ -55,6 +55,9 @@ e2e-docker:
 
 e2e-standalone-admin:
 	./automation/run-e2e-standalone-admin.sh
+
+e2e-release: ## real goreleaser --snapshot dry run (issue #49) -- Docker-free, no network, runs in `make ci`; requires goreleaser installed locally (https://goreleaser.com/install/)
+	./automation/run-e2e-release.sh
 
 ci: web ## fast suite + real end-to-end validation -- run before opening a PR (builds the admin UI first, issue #17)
 	./automation/run-all.sh

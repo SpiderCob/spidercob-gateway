@@ -16,6 +16,13 @@ build`) so the default path always produces a real, UI-serving binary;
 run `make web` by hand first if you're invoking `go build` directly
 instead of going through `make`.
 
+**goreleaser prerequisite (issue #49):** `run-e2e-release.sh` (`make ci`)
+needs a real `goreleaser` binary on `PATH` (`brew install goreleaser` on
+macOS, or see <https://goreleaser.com/install/>) -- same category of
+addition as the Node.js prerequisite above, not a new kind of
+requirement. Missing it fails that one script with a clear message
+rather than a cryptic "command not found."
+
 - **`run-tests.sh`** — the fast local/CI check: `gofmt -l`, `go vet`,
   `go build`, `go test ./... -race -count=1`. This already includes
   in-process integration tests that spawn real fixture MCP servers (e.g.
@@ -168,6 +175,23 @@ instead of going through `make`.
   `GET /admin/audit` rather than asserting immediately, since the audit
   worker is deliberately async. Not part of `make ci-interop` — no
   Docker needed, runs in `make ci`.
+
+- **`run-e2e-release.sh`** — issue #49's release pipeline
+  (`.goreleaser.yml`): release engineering has no application-level
+  unit-test seam, so this runs goreleaser's own `--snapshot --clean`
+  dry-run mode for real (no git tag, no publish, no network) and asserts
+  on the real output — all 4 platform archives (`{linux,darwin}` ×
+  `{amd64,arm64}`) exist, the one matching the host's own `GOOS`/`GOARCH`
+  is actually extracted and executed (not just "the file is present"),
+  its `-version` output proves the `-X` ldflags genuinely fired (not the
+  plain-`go build` `dev`/`none`/`unknown` default), the archive contains
+  `README.md`/`LICENSE`, and `checksums.txt` verifies against the real
+  archive bytes. Deliberately does **not** exercise cosign signing —
+  keyless signing needs a real GitHub Actions-issued OIDC token,
+  unavailable locally; that half is proven for real instead by
+  `.github/workflows/release.yml`'s separate PR-triggered snapshot job
+  (`id-token: write`). Not part of `make ci-interop`/`make ci-docker` —
+  no Docker, no network, runs in `make ci`.
 
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC

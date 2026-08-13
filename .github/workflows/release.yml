@@ -1,0 +1,106 @@
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    # A snapshot dry run (no tag, no publish) on any PR touching release
+    # config -- the one thing automation/run-e2e-release.sh (make ci)
+    # can't cover locally: cosign's keyless signing needs a real,
+    # CI-issued OIDC token (id-token: write below), so this is where
+    # that half of issue #49's pipeline actually gets proven end to end,
+    # before the first real tag is ever pushed.
+    paths:
+      - '.goreleaser.yml'
+      - 'cmd/spidercob/main.go'
+      - '.github/workflows/release.yml'
+
+jobs:
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the GitHub Release
+      id-token: write # cosign keyless signing (Sigstore OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs full history for its changelog
+      - uses: actions/setup-go@v5
+        with:
+          # Matches go.mod's `go 1.25.0` directive exactly -- ci.yml
+          # (the main PR/push workflow) still pins 1.22, a real,
+          # pre-existing gap (Copilot's review on PR #50 flagged the
+          # divergence this creates: tagged release artifacts built with
+          # a different toolchain than what PRs are validated against).
+          # Already identified and deliberately left out of scope for
+          # issue #49 -- see that spec's Out of Scope section: fixing
+          # ci.yml is a separate, unrelated change with its own blast
+          # radius, not bundled into a release-engineering PR. This
+          # workflow itself is correct (matches go.mod); ci.yml is the
+          # one that's stale.
+          go-version: '1.25'
+      # Deliberately NOT pinning cosign-release here: the action's own
+      # default (verified against this repo directly -- v3.0.6, at time
+      # of writing) is the version its own install-verification logic is
+      # actually tested against. Explicitly requesting a newer version
+      # (v3.1.3, what's on this machine via Homebrew) failed in CI with a
+      # 404 fetching a detached .sig file cosign's own release process no
+      # longer publishes for that tag -- a real, confirmed incompatibility
+      # between the installer action's custom-version code path and
+      # cosign's current release asset layout, not a hypothetical. Both
+      # v3.0.6 and v3.1.3 support sign-blob --bundle (confirmed locally
+      # against both real binaries), which is all .goreleaser.yml's
+      # signs: config needs -- so the installer's own default is both
+      # safer and sufficient.
+      - uses: sigstore/cosign-installer@v3
+      # HOMEBREW_TAP_GITHUB_TOKEN doesn't exist until the tap repo/secret
+      # setup described in .goreleaser.yml's brews: comment is done
+      # (a manual, one-time, org-level prerequisite) -- without this
+      # guard, goreleaser's brews publish step fails outright when the
+      # token is absent, which fails this whole job and marks the first
+      # real tag's release red for a reason that has nothing to do with
+      # whether the binaries/checksums/signatures themselves are good.
+      # Every other target (GitHub Release, binaries, checksums, cosign
+      # signatures) still publishes -- only Homebrew is conditionally
+      # skipped. Flagged by Copilot's review on PR #50.
+      - name: determine goreleaser args
+        id: gr-args
+        run: |
+          if [ -n "${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}" ]; then
+            echo "args=release --clean" >>"$GITHUB_OUTPUT"
+          else
+            echo "args=release --clean --skip=homebrew" >>"$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_GITHUB_TOKEN is not set -- skipping the Homebrew formula publish for this release. See .goreleaser.yml's brews: comment for the one-time tap-repo setup this needs."
+          fi
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: ${{ steps.gr-args.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  snapshot-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing -- the real point of this job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - uses: sigstore/cosign-installer@v3 # see the release job's comment above -- deliberately using the action's own tested default version
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          # --skip=publish,homebrew: never touches GitHub Releases or the
+          # tap repo from a PR. Signing is deliberately NOT skipped --
+          # proving that step works for real is this job's entire reason
+          # to exist (automation/run-e2e-release.sh already covers
+          # everything else locally, Docker-free, in make ci).
+          args: release --snapshot --clean --skip=publish,homebrew
