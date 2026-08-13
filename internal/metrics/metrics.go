@@ -50,6 +50,16 @@ func (c *Counter) Add(n float64, labelValues ...string) {
 	c.mu.Unlock()
 }
 
+// Value returns the counter's current total for the given label values --
+// exported for tests that need to assert a counter actually moved (issue
+// #45's audit-queue-overflow test), not just that the code path claiming
+// to increment it ran.
+func (c *Counter) Value(labelValues ...string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.vals[key(labelValues)]
+}
+
 func (c *Counter) write(b *strings.Builder) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -210,4 +220,11 @@ var (
 		"Latency of proxied MCP requests.",
 		[]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 		"node")
+
+	// AuditRecordsDropped counts per-MCP-request audit records dropped
+	// because the async write queue was full (issue #45) -- the signal
+	// that distinguishes "quiet gateway" from "audit trail silently
+	// losing data" under sustained load.
+	AuditRecordsDropped = NewCounter("spidercob_audit_records_dropped_total",
+		"Per-MCP-request audit records dropped because the write queue was full.")
 )

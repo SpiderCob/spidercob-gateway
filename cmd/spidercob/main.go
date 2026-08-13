@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sumeetgp/spidercob-gateway/internal/adminapi"
+	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	"github.com/sumeetgp/spidercob-gateway/internal/authserver"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
@@ -34,6 +35,21 @@ func (a authValidator) ValidateAccessToken(node, token string) (proxy.AuthClaims
 		return proxy.AuthClaims{}, err
 	}
 	return proxy.AuthClaims{Subject: c.Subject, Act: c.Act}, nil
+}
+
+// auditRecorderAdapter adapts *store.SQLiteStore to proxy.AuditRecorder
+// (issue #45) -- same pattern as authValidator: internal/proxy defines
+// the minimal interface it needs, this composition root adapts the
+// concrete store method to it. store.AppendAuditRecord returns
+// (AuditLogEntry, error); the proxy package has no use for the
+// AuditLogEntry (it never needs the row back), so this adapter discards
+// it rather than widening proxy.AuditRecorder's signature to carry a
+// type internal/proxy would otherwise never need to know about.
+type auditRecorderAdapter struct{ store store.Store }
+
+func (a auditRecorderAdapter) AppendAuditRecord(ctx context.Context, rec audit.Record) error {
+	_, err := a.store.AppendAuditRecord(ctx, rec)
+	return err
 }
 
 // adminAuthValidator adapts *authserver.AuthServer to
@@ -366,6 +382,13 @@ func main() {
 	// drift detection to actually exercise this feature end-to-end.
 	pinRegistry := pin.NewRegistry(db)
 	gw.SetPinRegistry(pinRegistry)
+
+	// Per-MCP-request audit trail (issue #45): extends the hash-chained
+	// audit_log (issue #23, previously wired only into internal/adminapi)
+	// to actual proxied MCP traffic. Always wired in, independent of
+	// DevAllowAllPolicy/pinning -- unlike those, auditing has no reason
+	// to ever be conditionally disabled once a store exists to back it.
+	gw.SetAuditRecorder(auditRecorderAdapter{store: db})
 
 	pinIntervals := make(map[string]time.Duration, len(cfg.Nodes))
 	for _, n := range cfg.Nodes {

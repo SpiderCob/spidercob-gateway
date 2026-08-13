@@ -239,6 +239,70 @@ func TestListAuditRecordsPage_ZeroOrNegativeLimitDefaults(t *testing.T) {
 	}
 }
 
+// mcpRequestAuditRecord mirrors what internal/proxy.enqueueAudit actually
+// produces for a per-MCP-request record (issue #45): only one of the two
+// actor fields populated (never both, unlike an admin action), and
+// ActorHumanRole always empty -- AuthClaims carries no role concept.
+// agentSubject == "" means "human actor", matching
+// proxy.actorFieldsFromClaims' own either/or split.
+func mcpRequestAuditRecord(agentSubject, humanUsername, action, resource string) audit.Record {
+	return audit.Record{
+		Timestamp:          time.Now(),
+		ActorNHISubject:    agentSubject,
+		ActorHumanUsername: humanUsername,
+		Action:             action,
+		Resource:           resource,
+	}
+}
+
+// TestAppendAuditRecord_AdminAndMCPRequestRecordsShareOneVerifiableChain
+// proves issue #45's core integrity claim: admin-mutation records
+// (internal/adminapi.logAdminAction's shape -- both actor fields, a real
+// role) and per-MCP-request records (proxy.enqueueAudit's shape -- one
+// actor field, no role) interleaved in true chronological order still
+// form a single, continuous, tamper-evident chain -- not two parallel
+// ones that happen to share a table. TestListAuditRecords_ReturnsChainOrder
+// already covers multiple records of the *same* shape; this is the one
+// that mixes shapes.
+func TestAppendAuditRecord_AdminAndMCPRequestRecordsShareOneVerifiableChain(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	sequence := []audit.Record{
+		testAuditRecord("create_agent", "agt_1"),                                      // admin action: both actor fields + role
+		mcpRequestAuditRecord("agent:agt_1", "", "initialize:allowed", "jira"),        // MCP request: NHI-only actor
+		mcpRequestAuditRecord("", "alice", "tools/call:denied_policy", "jira/delete"), // MCP request: human-only actor
+		testAuditRecord("kill_session", "sess_9"),                                     // admin action again
+		mcpRequestAuditRecord("agent:agt_1", "", "tools/call:allowed", "jira/search"), // MCP request again
+	}
+	for i, rec := range sequence {
+		if _, err := s.AppendAuditRecord(ctx, rec); err != nil {
+			t.Fatalf("AppendAuditRecord(%d): %v", i, err)
+		}
+	}
+
+	entries, err := s.ListAuditRecords(ctx)
+	if err != nil {
+		t.Fatalf("ListAuditRecords: %v", err)
+	}
+	if len(entries) != len(sequence) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(sequence))
+	}
+	for i, want := range sequence {
+		if entries[i].Action != want.Action || entries[i].Resource != want.Resource {
+			t.Fatalf("entries[%d] = %+v, want Action=%q Resource=%q", i, entries[i], want.Action, want.Resource)
+		}
+	}
+
+	stored := make([]audit.StoredRecord, len(entries))
+	for i, e := range entries {
+		stored[i] = e.StoredRecord
+	}
+	if err := audit.Verify(stored); err != nil {
+		t.Fatalf("audit.Verify on a real chain mixing admin-action and MCP-request record shapes: %v", err)
+	}
+}
+
 func TestListAuditRecordsPage_EmptyTable(t *testing.T) {
 	s := openTestStore(t)
 	page, err := s.ListAuditRecordsPage(context.Background(), 10, 0)
