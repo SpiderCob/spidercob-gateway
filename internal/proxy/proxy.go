@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
 	"github.com/sumeetgp/spidercob-gateway/internal/pin"
@@ -93,6 +94,14 @@ type Gateway struct {
 
 	stopReaper chan struct{}
 	reaperDone chan struct{}
+
+	// auditRecorder is nil until SetAuditRecorder is called -- see its
+	// doc comment (audit.go) for why that's a legitimate, permanent
+	// steady state, not just a startup window.
+	auditRecorder   AuditRecorder
+	auditQueue      chan audit.Record
+	stopAuditWorker chan struct{}
+	auditWorkerDone chan struct{}
 }
 
 // New builds a Gateway. authn validates every request's bearer token
@@ -183,6 +192,14 @@ func (g *Gateway) SetPinRegistry(r *pin.Registry) {
 func (g *Gateway) Close() error {
 	close(g.stopReaper)
 	<-g.reaperDone
+
+	// The audit worker only exists once SetAuditRecorder has actually
+	// been called (audit.go) -- most unit tests in this package never
+	// call it, so stopAuditWorker stays nil and there's nothing to stop.
+	if g.stopAuditWorker != nil {
+		close(g.stopAuditWorker)
+		<-g.auditWorkerDone
+	}
 
 	var errs []string
 	for _, id := range g.sessions.allIDs() {
@@ -277,10 +294,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	decision := g.policy.Decide(r.Context(), claims.Subject, nodeName, rpcMethod, toolName)
 	if decision.RateLimited {
+		g.enqueueAudit(claims, rpcMethod+":rate_limited", auditResource(nodeName, toolName))
 		http.Error(sr, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 	if !decision.Allowed {
+		g.enqueueAudit(claims, rpcMethod+":denied_policy", auditResource(nodeName, toolName))
 		http.Error(sr, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -291,6 +310,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// two independent gates, both must pass. No re-approval mechanism
 	// exists yet (Phase 4), so this stays a hard block, not a warning.
 	if rpcMethod == "tools/call" && g.pins != nil && g.pins.IsQuarantined(r.Context(), nodeName, toolName) {
+		g.enqueueAudit(claims, rpcMethod+":quarantined", auditResource(nodeName, toolName))
 		http.Error(sr, "tool quarantined: its definition changed since it was first observed", http.StatusForbidden)
 		return
 	}
@@ -314,6 +334,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// mode (e.g. "arguments do not match pinned schema: ...",
 				// or a schema parse/resolve failure) -- don't prepend
 				// another "...pinned schema" wrapper on top of it.
+				g.enqueueAudit(claims, rpcMethod+":schema_rejected", auditResource(nodeName, toolName))
 				writeJSONRPCError(sr, body, "tool call rejected: "+err.Error())
 				return
 			}
@@ -333,6 +354,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// scan chain's own unconditional Block action (e.g. secrets
 			// outbound, already blocked regardless of policy).
 			if v.Action == scan.Block || (decision.BlockOnScanFlag && v.Action != scan.Allow) {
+				g.enqueueAudit(claims, rpcMethod+":blocked_scan", auditResource(nodeName, toolName))
 				writeJSONRPCError(sr, body, "request blocked by spidercob sanitization")
 				return
 			}
@@ -346,6 +368,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(sr, "missing Mcp-Session-Id", http.StatusBadRequest)
 			return
 		}
+		g.enqueueAudit(claims, rpcMethod+":allowed", auditResource(nodeName, toolName))
 		g.handleNewSession(sr, r, nc)
 		return
 	}
@@ -366,6 +389,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.touch()
+	g.enqueueAudit(claims, rpcMethod+":allowed", auditResource(nodeName, toolName))
 	g.forward(sr, r, sess, false, rpcMethod)
 }
 

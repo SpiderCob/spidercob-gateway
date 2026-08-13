@@ -155,6 +155,20 @@ instead of going through `make`.
   and confirms verification now fails and names that exact record. Not
   part of `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-mcp-audit.sh`** — issue #45's per-MCP-request audit trail,
+  against the real compiled binary: a real, policy-authorized `tools/call`
+  and a real policy-denied request (a no-group agent) both leave a real
+  audit_log row — enforcement itself is what's being audited, not just
+  successes — retrievable via the real `GET /admin/audit` endpoint
+  (issue #25), tool name included in the resource field
+  (`"echo/echo"`). Also proves the two paths issue #45's spec explicitly
+  excludes really do leave no record: an unauthenticated request (no
+  validated principal to attribute it to yet) and a session-teardown
+  `DELETE` (lifecycle management, not a policy-gated access). Polls
+  `GET /admin/audit` rather than asserting immediately, since the audit
+  worker is deliberately async. Not part of `make ci-interop` — no
+  Docker needed, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

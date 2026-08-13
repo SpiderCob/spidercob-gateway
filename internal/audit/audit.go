@@ -1,10 +1,12 @@
 // Package audit is the gateway's hash-chained audit trail (issue #23),
-// currently wired to one consumer: internal/adminapi's admin-mutation
-// actions (logAdminAction). Deliberately scoped narrower than
-// docs/design.md §6's fuller vision (a record for every proxied MCP
-// request) -- that's real, separate, later work with its own hot-path
-// latency-budget considerations; see the issue #23 spec for the
-// seam-check reasoning.
+// wired to two consumers: internal/adminapi's admin-mutation actions
+// (logAdminAction), and, since issue #45, internal/proxy's per-MCP-request
+// traffic (Gateway.enqueueAudit, via the AuditRecorder seam) -- exactly
+// the docs/design.md §6 fuller vision issue #23 originally deferred as
+// separate, hot-path-sensitive work. Both consumers share this same
+// Record shape (see its own doc comment) and one continuous
+// store-persisted chain; audit.Verify has no notion of "which consumer
+// wrote this row."
 //
 // This package is pure -- no I/O, no store dependency -- mirroring
 // internal/pin's Hash/Drifted split: Hash/Verify are the directly
@@ -20,16 +22,21 @@ import (
 )
 
 // Record is one audit-worthy event. Field names are deliberately
-// generic (not e.g. NodeID/Method/Tool-specific) so a later
-// per-MCP-request audit issue can reuse this same shape rather than
-// needing a new type or a breaking schema change (issue #23 spec,
-// story 12).
+// generic (not e.g. NodeID/Method/Tool-specific) so both consumers can
+// share this one shape rather than needing separate types or a breaking
+// schema change (issue #23 spec, story 12) -- issue #45's per-MCP-request
+// records reuse it exactly this way: Action encodes "<rpc_method>:
+// <outcome>" (e.g. "tools/call:denied_policy"), Resource encodes
+// "<node>[/<tool>]".
 type Record struct {
 	Timestamp time.Time
 	// ActorNHISubject may be empty -- a UI-session-originated admin
 	// action has no NHI subject, mirroring internal/adminapi's
 	// existing adminIdentity.nhiSubject field, which is already
-	// sometimes empty for that exact reason (issue #17).
+	// sometimes empty for that exact reason (issue #17). A
+	// per-MCP-request record (issue #45) populates exactly one of
+	// ActorNHISubject/ActorHumanUsername, never both, and leaves
+	// ActorHumanRole empty -- AuthClaims carries no role concept.
 	ActorNHISubject    string
 	ActorHumanUsername string
 	ActorHumanRole     string
