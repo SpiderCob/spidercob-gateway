@@ -81,7 +81,10 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 4c-5: audit viewer — `GET /admin/audit` (paginated, both credential shapes from day one) + the admin UI's fifth screen; chain verification itself stays off the HTTP surface
 - [x] Phase 4c-6: kill-session — `GET/DELETE /admin/sessions`, sixth admin UI screen
 - [x] Phase 4c-7: config-snippet generator — real, ready-to-paste MCP client config at agent-creation time
-- [ ] Phase 4c-8: docker packaging (spec'd, [issue #39](https://github.com/SpiderCob/spidercob-gateway/issues/39)) → **OSS launch**
+- [x] Phase 4c-8: docker packaging — real `docker build`/`docker compose up`, admin UI actually built into the image
+- [x] Phase 4c-9: policy matrix visualization — read-only groups-×-nodes access-at-a-glance view on the Policies screen
+- [ ] Standalone admin login (spec'd, [issue #43](https://github.com/SpiderCob/spidercob-gateway/issues/43)) — local group-based admin access for no-spider-snoop deployments
+- [ ] goreleaser signed releases + `brew install` → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
