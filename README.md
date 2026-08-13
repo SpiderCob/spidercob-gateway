@@ -95,7 +95,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 4c-9: policy matrix visualization — read-only groups-×-nodes access-at-a-glance view on the Policies screen
 - [x] Standalone admin login — local group-based admin access for no-spider-snoop deployments; the Login screen auto-detects which credential shape a deployment accepts
 - [x] Per-MCP-request audit trail — every proxied `tools/call`/`tools/list`/`initialize`, allowed or denied, now leaves a hash-chained `audit_log` row (async, bounded write queue so this never adds latency to the request path)
-- [ ] goreleaser signed releases + `brew install` → **OSS launch**
+- [x] goreleaser signed releases + `brew install` — pipeline built and proven end to end (real snapshot dry run + a real CI cosign signing round-trip); no tag has actually been pushed yet, so [Installing a release](#installing-a-release) above still describes a not-yet-live path → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
