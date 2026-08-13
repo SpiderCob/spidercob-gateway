@@ -369,6 +369,70 @@ func TestGateway_AuditDoesNotRecordUnknownNode(t *testing.T) {
 	assertRecordCountStable(t, rec, 0)
 }
 
+func TestGateway_AuditDoesNotRecordMissingSessionID(t *testing.T) {
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	gw := newHTTPTestGateway(t, upstream.URL)
+	rec := newFakeAuditRecorder()
+	gw.SetAuditRecorder(rec)
+
+	// tools/call with no Mcp-Session-Id at all: this already passed the
+	// policy decision (AllowAll), but fails on a session-lifecycle
+	// ground, not an authorization one -- deliberately excluded, per
+	// proxy.go's comment right above this branch (issue #45 spec;
+	// flagged by Copilot's review on PR #46 for needing an explicit
+	// statement, not just an implicit omission).
+	respRec := doWithSession(gw, "jira", "", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"anything","arguments":{}}}`)
+	if respRec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", respRec.Code, respRec.Body.String())
+	}
+
+	assertRecordCountStable(t, rec, 0)
+}
+
+// TestGateway_SetAuditRecorderCalledTwiceStopsThePriorWorker is the direct
+// regression test for Copilot's review comment on PR #46: a second
+// SetAuditRecorder call used to leave the first worker goroutine running
+// forever and Close() only stopping the most recently installed one. The
+// fix makes setAuditRecorder stop and fully await the prior worker before
+// installing a new one -- this proves both halves of that: the prior
+// worker's channels are actually closed (not orphaned), and records
+// enqueued after the switch reach the new recorder, not the old one.
+func TestGateway_SetAuditRecorderCalledTwiceStopsThePriorWorker(t *testing.T) {
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	gw := newHTTPTestGateway(t, upstream.URL)
+
+	first := newFakeAuditRecorder()
+	gw.SetAuditRecorder(first)
+	firstStop := gw.stopAuditWorker
+	firstDone := gw.auditWorkerDone
+
+	second := newFakeAuditRecorder()
+	gw.SetAuditRecorder(second) // must stop and await the first worker before returning
+
+	select {
+	case <-firstStop:
+	default:
+		t.Fatal("the prior worker's stop channel was not closed -- it would have leaked instead of being stopped")
+	}
+	select {
+	case <-firstDone:
+	default:
+		t.Fatal("the prior worker's done channel was not closed -- its goroutine never actually exited")
+	}
+
+	sessionID, _ := initialize(t, gw, "jira")
+	_ = sessionID
+	got := second.waitForCount(t, 1)
+	if got[0].Action != "initialize:allowed" {
+		t.Fatalf("Action = %q, want %q", got[0].Action, "initialize:allowed")
+	}
+	if n := len(first.snapshot()); n != 0 {
+		t.Fatalf("the old recorder received %d record(s) after being superseded, want 0", n)
+	}
+}
+
 // TestGateway_AuditQueueOverflowDropsRecordAndNeverBlocksResponse is the
 // one property issue #45's async/bounded-queue design exists for: a full
 // queue must never fail or delay the underlying MCP request, and the
