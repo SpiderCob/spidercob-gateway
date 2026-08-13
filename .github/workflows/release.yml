@@ -29,9 +29,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25' # matches go.mod's `go 1.25.0` directive exactly
+      # Deliberately NOT pinning cosign-release here: the action's own
+      # default (verified against this repo directly -- v3.0.6, at time
+      # of writing) is the version its own install-verification logic is
+      # actually tested against. Explicitly requesting a newer version
+      # (v3.1.3, what's on this machine via Homebrew) failed in CI with a
+      # 404 fetching a detached .sig file cosign's own release process no
+      # longer publishes for that tag -- a real, confirmed incompatibility
+      # between the installer action's custom-version code path and
+      # cosign's current release asset layout, not a hypothetical. Both
+      # v3.0.6 and v3.1.3 support sign-blob --bundle (confirmed locally
+      # against both real binaries), which is all .goreleaser.yml's
+      # signs: config needs -- so the installer's own default is both
+      # safer and sufficient.
       - uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: 'v3.1.3' # pinned to match .goreleaser.yml's signs: config -- see its comment for why the exact version matters (cosign v3's sign-blob hard-requires --bundle)
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -52,9 +63,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: 'v3.1.3'
+      - uses: sigstore/cosign-installer@v3 # see the release job's comment above -- deliberately using the action's own tested default version
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser

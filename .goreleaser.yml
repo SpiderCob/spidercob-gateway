@@ -68,11 +68,16 @@ signs:
     # with the signature + certificate + transparency-log entry) --
     # the older --output-signature/--output-certificate pair goreleaser's
     # own docs still show is a v2-era default that cosign v3 rejects
-    # outright ("must specify --bundle with --new-bundle-format"),
-    # confirmed directly against a real installed cosign v3.1.3 while
-    # building this. .github/workflows/release.yml pins the same cosign
-    # version via sigstore/cosign-installer so CI never silently drifts
-    # onto a version this flag shape doesn't match.
+    # outright ("must specify --bundle with --new-bundle-format").
+    # Confirmed directly against two real installed cosign versions while
+    # building this (v3.0.6 and v3.1.3, both support --bundle on both
+    # sign-blob and verify-blob) -- .github/workflows/release.yml
+    # deliberately does NOT pin an exact cosign version (see its own
+    # comment: pinning to v3.1.3 specifically broke CI, a real
+    # incompatibility with the installer action's own version-
+    # verification logic, not a hypothetical), relying instead on that
+    # action's tested default, which this flag shape is confirmed
+    # compatible with regardless of which of the two it resolves to.
     args:
       - sign-blob
       - "--yes"
