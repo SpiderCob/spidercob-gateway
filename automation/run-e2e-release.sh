@@ -45,8 +45,13 @@ check_contains() {
 	fi
 }
 
+work_dir="" # set below, after the goreleaser-installed check -- initialized
+# here so cleanup() (registered via trap next, before that check runs)
+# never dereferences an unset variable under set -u if the script exits
+# early (e.g. goreleaser missing). Flagged by Copilot's review on PR #50.
 cleanup() {
-	rm -rf "$dist_dir" "$work_dir"
+	rm -rf "$dist_dir"
+	[[ -n "$work_dir" ]] && rm -rf "$work_dir"
 }
 trap cleanup EXIT
 
@@ -72,6 +77,12 @@ done
 
 echo "==> a real checksums.txt exists and verifies against the real archive bytes"
 check "checksums.txt exists" "$([[ -f "$dist_dir/checksums.txt" ]] && echo yes || echo no)" "yes"
+# set -e would otherwise abort the whole script the instant this fails,
+# skipping the structured FAIL report below entirely -- errexit is
+# disabled around just this one command so checksum_status can actually
+# capture the real exit code, not have it swallowed. Flagged by
+# Copilot's review on PR #50.
+set +e
 (
 	cd "$dist_dir"
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -81,6 +92,7 @@ check "checksums.txt exists" "$([[ -f "$dist_dir/checksums.txt" ]] && echo yes |
 	fi
 )
 checksum_status=$?
+set -e
 check "every archive's checksum matches its real bytes" "$([[ "$checksum_status" -eq 0 ]] && echo yes || echo no)" "yes"
 if [[ "$checksum_status" -ne 0 ]]; then
 	cat "$work_dir/checksum-verify.log" >&2

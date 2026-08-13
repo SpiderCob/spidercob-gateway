@@ -12,7 +12,16 @@ project_name: spidercob-gateway
 
 before:
   hooks:
-    - go mod tidy
+    # `go mod tidy` (goreleaser's own init-template default) mutates
+    # go.mod/go.sum in place -- risky as a release-build hook, since a
+    # tagged release should build from exactly the tagged commit's
+    # checked-in state, not a state this hook silently rewrote out from
+    # under it. `-diff` verifies tidiness (non-zero exit if go.mod/go.sum
+    # would change) without touching either file -- go.mod is already
+    # kept tidy by normal development discipline (make ci's go vet/go
+    # build/go test all require it), so this is a real guard against
+    # drift, not busywork. Flagged by Copilot's review on PR #50.
+    - go mod tidy -diff
 
 builds:
   - id: spidercob
