@@ -1,0 +1,67 @@
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    # A snapshot dry run (no tag, no publish) on any PR touching release
+    # config -- the one thing automation/run-e2e-release.sh (make ci)
+    # can't cover locally: cosign's keyless signing needs a real,
+    # CI-issued OIDC token (id-token: write below), so this is where
+    # that half of issue #49's pipeline actually gets proven end to end,
+    # before the first real tag is ever pushed.
+    paths:
+      - '.goreleaser.yml'
+      - 'cmd/spidercob/main.go'
+      - '.github/workflows/release.yml'
+
+jobs:
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the GitHub Release
+      id-token: write # cosign keyless signing (Sigstore OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs full history for its changelog
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25' # matches go.mod's `go 1.25.0` directive exactly
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v3.1.3' # pinned to match .goreleaser.yml's signs: config -- see its comment for why the exact version matters (cosign v3's sign-blob hard-requires --bundle)
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  snapshot-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing -- the real point of this job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v3.1.3'
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          # --skip=publish,homebrew: never touches GitHub Releases or the
+          # tap repo from a PR. Signing is deliberately NOT skipped --
+          # proving that step works for real is this job's entire reason
+          # to exist (automation/run-e2e-release.sh already covers
+          # everything else locally, Docker-free, in make ci).
+          args: release --snapshot --clean --skip=publish,homebrew

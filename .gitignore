@@ -1,4 +1,5 @@
 /spidercob
+/dist
 config.json
 *.db
 *.db-shm

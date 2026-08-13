@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,19 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/store"
 	"github.com/sumeetgp/spidercob-gateway/internal/uisession"
 	"github.com/sumeetgp/spidercob-gateway/internal/webui"
+)
+
+// version, commit, and date are overridden at build time via
+// -ldflags="-X main.version=... -X main.commit=... -X main.date=..."
+// (issue #49) -- goreleaser's release build sets these from the
+// triggering git tag; a plain `go build` (local development, the
+// existing Dockerfile, `make build`, CI's `go build ./...`) leaves them
+// at these defaults, so nothing else changes for any build path that
+// isn't goreleaser's.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 // authValidator adapts *authserver.AuthServer to proxy.TokenValidator so
@@ -173,7 +187,15 @@ func storeNodeToConfigNode(n store.Node) config.Node {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to gateway config file")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	// Checked before any config/store I/O -- "spidercob -version" must
+	// never require a config file to exist (issue #49).
+	if *showVersion {
+		fmt.Printf("spidercob %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
 
 	// Structured JSON logs to stdout — ship them anywhere (Loki, etc.)
 	// with a log collector. See docs/observability.md.

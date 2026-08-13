@@ -1,0 +1,131 @@
+# Signed, cross-platform release binaries + a Homebrew formula (issue
+# #49) -- the deliberately-deferred second half of issue #39's Docker
+# packaging work. See automation/run-e2e-release.sh for the real,
+# unpublished dry-run proof this config is exercised against on every
+# push (`make ci`), and docs/verify-release.md for what a downloader
+# actually runs to check a release artifact.
+#
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: spidercob-gateway
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: spidercob
+    main: ./cmd/spidercob
+    binary: spidercob
+    # Matches the existing production Dockerfile's build flags exactly
+    # (CGO_ENABLED=0, -s -w) -- modernc.org/sqlite is pure Go, so this
+    # was never a new constraint, just consistency with what's already
+    # shipped. The -X flags are the new half: main.version/commit/date
+    # (cmd/spidercob/main.go's new -version flag) are "dev"/"none"/
+    # "unknown" on a plain `go build`; goreleaser is the only build path
+    # that ever overrides them.
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    # A release archive is "here's the binary," not a scaffolded project
+    # directory -- config.example.json/docker-compose.yml stay out;
+    # README.md/LICENSE are goreleaser's own long-standing default
+    # inclusion anyway, named explicitly here so the intent isn't
+    # implicit.
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+# Sigstore/cosign, keyless (confirmed with the user over GPG-signed
+# checksums -- issue #49 spec): signs the checksums file, which
+# transitively covers every archive since it hashes them all -- one
+# signature to verify, not one per artifact. Needs a real GitHub
+# Actions-issued OIDC token (`id-token: write`, .github/workflows/
+# release.yml) -- there is no key to generate or store as a repo secret,
+# and this step cannot succeed outside CI (a local `goreleaser release`
+# run would fail authentication here, by design; automation/
+# run-e2e-release.sh's local dry run deliberately skips this step for
+# exactly that reason).
+signs:
+  - cmd: cosign
+    signature: "${artifact}.bundle"
+    # cosign v3's sign-blob hard-requires --bundle (a single JSON file
+    # with the signature + certificate + transparency-log entry) --
+    # the older --output-signature/--output-certificate pair goreleaser's
+    # own docs still show is a v2-era default that cosign v3 rejects
+    # outright ("must specify --bundle with --new-bundle-format"),
+    # confirmed directly against a real installed cosign v3.1.3 while
+    # building this. .github/workflows/release.yml pins the same cosign
+    # version via sigstore/cosign-installer so CI never silently drifts
+    # onto a version this flag shape doesn't match.
+    args:
+      - sign-blob
+      - "--yes"
+      - "--bundle=${signature}"
+      - "${artifact}"
+    artifacts: checksum
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: SpiderCob
+    name: spidercob-gateway
+  footer: >-
+
+    ## Verifying this release
+
+    Every artifact is covered by `checksums.txt`, itself signed keylessly
+    via Sigstore/cosign using this repo's own GitHub Actions identity --
+    no private key involved. See
+    [docs/verify-release.md](https://github.com/SpiderCob/spidercob-gateway/blob/main/docs/verify-release.md)
+    for the exact `cosign verify-blob` command to run.
+
+# Publishes the generated formula to a separate tap repository -- brew
+# tap conventions require a distinct `homebrew-<name>` repo, not this
+# one. Creating that repo and the HOMEBREW_TAP_GITHUB_TOKEN secret this
+# publish step needs are a manual, one-time, org-level prerequisite
+# outside this config (issue #49 spec's Further Notes) -- until both
+# exist, this is the one release target that fails; every other target
+# above (GitHub Release, binaries, checksums, cosign signatures)
+# publishes independently and is unaffected.
+#
+# `brews:` is flagged deprecated by `goreleaser check` (schema-level,
+# pointing at homebrew_casks as the newer mechanism) but is still fully
+# functional in this goreleaser version, and deliberately kept: a CLI
+# tool like this belongs in Homebrew as a Formula, not a Cask (Casks are
+# Homebrew's category for GUI/prebuilt-app installs) -- there is no
+# current `homebrew_formula:` replacement key to migrate to. Revisit if
+# a future goreleaser major version actually removes `brews:` outright.
+brews:
+  - name: spidercob-gateway
+    repository:
+      owner: SpiderCob
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/SpiderCob/spidercob-gateway"
+    description: "Open-source MCP gateway: agent identity (ID-JAG/EMA), policy, and DLP in one container."
+    license: "Apache-2.0"
+    test: |
+      system "#{bin}/spidercob", "-version"
