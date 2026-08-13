@@ -18,9 +18,14 @@ Every `v*` tag publishes signed, cross-platform binaries (`linux`/`darwin`
 × `amd64`/`arm64`) to the [Releases page](https://github.com/SpiderCob/spidercob-gateway/releases),
 signed keylessly via Sigstore/cosign — see [docs/verify-release.md](docs/verify-release.md)
 for how to verify a download actually came from this project's own CI.
-`brew install SpiderCob/tap/spidercob-gateway` becomes available the same
-way, once the first tagged release exists. No release has been tagged
-yet — the sections below are how to run the gateway until then.
+[`v0.1.0`](https://github.com/SpiderCob/spidercob-gateway/releases/tag/v0.1.0)
+is the first such release — a pre-launch tag proving the pipeline for
+real (repo is still private, not the official launch), verified end to
+end: real signed archives, a real `cosign verify-blob` pass against the
+published bundle, a real extracted binary run. `brew install
+SpiderCob/tap/spidercob-gateway` isn't available yet — that needs a
+separate tap repository that doesn't exist yet — so the sections below
+are still how to run the gateway for now.
 
 ## Quickstart (current skeleton)
 
@@ -95,7 +100,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Phase 4c-9: policy matrix visualization — read-only groups-×-nodes access-at-a-glance view on the Policies screen
 - [x] Standalone admin login — local group-based admin access for no-spider-snoop deployments; the Login screen auto-detects which credential shape a deployment accepts
 - [x] Per-MCP-request audit trail — every proxied `tools/call`/`tools/list`/`initialize`, allowed or denied, now leaves a hash-chained `audit_log` row (async, bounded write queue so this never adds latency to the request path)
-- [x] goreleaser signed releases + `brew install` — pipeline built and proven end to end (real snapshot dry run + a real CI cosign signing round-trip); no tag has actually been pushed yet, so [Installing a release](#installing-a-release) above still describes a not-yet-live path → **OSS launch**
+- [x] goreleaser signed releases + `brew install` — pipeline built and proven end to end; `v0.1.0` tagged and verified live (real signed archives, real `cosign verify-blob` pass). `brew install` itself still isn't live — needs a separate tap repo that doesn't exist yet → **OSS launch**
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
