@@ -380,9 +380,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// of the three exclusions this comment describes.)
 	// (Flagged by Copilot's review on PR #46, after merge -- documented
 	// here as a direct follow-up; wording corrected per Copilot's review
-	// on PR #47, also after merge -- see CONTEXT.md for the "don't merge
-	// the instant CI goes green" lesson this is now the second instance
-	// of.)
+	// on PR #47, also after merge.)
 	if sessionID == "" {
 		if rpcMethod != "initialize" {
 			http.Error(sr, "missing Mcp-Session-Id", http.StatusBadRequest)
