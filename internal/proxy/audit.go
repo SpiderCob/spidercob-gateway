@@ -17,6 +17,17 @@ import (
 // decision), so this stays a fixed constant.
 const auditQueueCapacity = 256
 
+// auditWriteTimeout bounds each individual store write runAuditWorker
+// performs. store.AppendAuditRecord's SQLite connection already has a 5s
+// busy_timeout (internal/store/sqlite.go) -- without a context deadline
+// here, a stuck or blocked write could still hang runAuditWorker (and
+// therefore Close(), which waits on auditWorkerDone) indefinitely,
+// contradicting runAuditWorker's own "Close() can't hang on this" claim.
+// 10s gives headroom above the busy_timeout without leaving shutdown
+// genuinely unbounded. (Flagged by Copilot's review on PR #46, after
+// merge -- fixed here as a direct follow-up.)
+const auditWriteTimeout = 10 * time.Second
+
 // AuditRecorder is what the proxy needs to persist a per-MCP-request
 // audit record (issue #45) -- a minimal interface mirroring
 // TokenValidator's seam so this package doesn't need to import
@@ -41,39 +52,64 @@ func (g *Gateway) SetAuditRecorder(a AuditRecorder) {
 // setAuditRecorder is SetAuditRecorder's real implementation, taking an
 // explicit queue capacity so tests can exercise overflow directly
 // against a real queue rather than against a hypothetical one.
+//
+// SetAuditRecorder's contract is "called once, by the composition root,
+// right after New" -- but a second call is made safe rather than left to
+// leak: without this, the old runAuditWorker goroutine would block
+// forever on channels nothing references anymore (its select reads the
+// struct fields, which a second call would have already overwritten),
+// and Close() would only ever stop the most recently installed worker,
+// silently leaving the first one running (and its queue never drained)
+// for the rest of the process's life. So any existing worker is stopped
+// and fully exited *before* new channels are created. The new channels
+// are also assigned before auditRecorder, deliberately: enqueueAudit's
+// nil-check on auditRecorder is what a concurrent caller uses to decide
+// the queue is ready, so auditRecorder must never go non-nil first.
+// (Flagged by Copilot's review on PR #46, after merge -- fixed here as a
+// direct follow-up.)
 func (g *Gateway) setAuditRecorder(a AuditRecorder, capacity int) {
+	if g.stopAuditWorker != nil {
+		close(g.stopAuditWorker)
+		<-g.auditWorkerDone
+	}
+	queue := make(chan audit.Record, capacity)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	g.auditQueue = queue
+	g.stopAuditWorker = stop
+	g.auditWorkerDone = done
 	g.auditRecorder = a
-	g.auditQueue = make(chan audit.Record, capacity)
-	g.stopAuditWorker = make(chan struct{})
-	g.auditWorkerDone = make(chan struct{})
-	go g.runAuditWorker()
+	go g.runAuditWorker(queue, stop, done)
 }
 
-// runAuditWorker is the single consumer draining g.auditQueue -- the
-// thing that keeps hash-chain writes correctly serialized regardless of
-// how many request goroutines are enqueuing concurrently
-// (store.AppendAuditRecord's read-last-hash-then-insert requires exactly
-// this, whether or not this package is the one enforcing it). On
-// shutdown it drains whatever's already buffered, bounded by that
-// buffer's size -- it never blocks waiting for new sends once shutdown
-// has begun, so Close() can't hang on this.
-func (g *Gateway) runAuditWorker() {
-	defer close(g.auditWorkerDone)
+// runAuditWorker is the single consumer draining queue -- the thing that
+// keeps hash-chain writes correctly serialized regardless of how many
+// request goroutines are enqueuing concurrently (store.AppendAuditRecord's
+// read-last-hash-then-insert requires exactly this, whether or not this
+// package is the one enforcing it). On shutdown it drains whatever's
+// already buffered, bounded by that buffer's size -- it never blocks
+// waiting for new sends once shutdown has begun, so Close() can't hang on
+// that. queue/stop/done are passed explicitly (not read from the Gateway
+// struct on every loop iteration) so this goroutine keeps operating on
+// exactly the channels it was started with, even if setAuditRecorder is
+// later called again and overwrites those fields with a new set.
+func (g *Gateway) runAuditWorker(queue chan audit.Record, stop, done chan struct{}) {
+	defer close(done)
 	for {
 		select {
-		case <-g.stopAuditWorker:
-			g.drainAuditQueue()
+		case <-stop:
+			g.drainAuditQueue(queue)
 			return
-		case rec := <-g.auditQueue:
+		case rec := <-queue:
 			g.writeAuditRecord(rec)
 		}
 	}
 }
 
-func (g *Gateway) drainAuditQueue() {
+func (g *Gateway) drainAuditQueue(queue chan audit.Record) {
 	for {
 		select {
-		case rec := <-g.auditQueue:
+		case rec := <-queue:
 			g.writeAuditRecord(rec)
 		default:
 			return
@@ -81,8 +117,13 @@ func (g *Gateway) drainAuditQueue() {
 	}
 }
 
+// writeAuditRecord persists rec with a bounded context (auditWriteTimeout)
+// -- never context.Background() -- so a stuck or blocked store write can't
+// hang this worker, and therefore can't hang Close() either.
 func (g *Gateway) writeAuditRecord(rec audit.Record) {
-	if err := g.auditRecorder.AppendAuditRecord(context.Background(), rec); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
+	defer cancel()
+	if err := g.auditRecorder.AppendAuditRecord(ctx, rec); err != nil {
 		slog.Error("failed to append MCP-request audit record", "action", rec.Action, "resource", rec.Resource, "err", err)
 	}
 }
