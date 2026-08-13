@@ -46,6 +46,22 @@ export function login(spiderSnoopSessionToken: string): Promise<WhoAmI> {
   return request<WhoAmI>('POST', '/admin/ui/session', { spider_snoop_session_token: spiderSnoopSessionToken })
 }
 
+// loginLocal is login()'s standalone (no spider-snoop) counterpart
+// (issue #43) -- same endpoint, a username/password body instead of a
+// spider-snoop token.
+export function loginLocal(username: string, password: string): Promise<WhoAmI> {
+  return request<WhoAmI>('POST', '/admin/ui/session', { username, password })
+}
+
+export type AuthMode = 'local' | 'spider_snoop'
+
+// getAuthMode tells the Login screen which credential shape this
+// deployment actually accepts, before it renders anything (issue #43).
+// Unauthenticated, like login()/whoami() themselves.
+export function getAuthMode(): Promise<{ mode: AuthMode }> {
+  return request<{ mode: AuthMode }>('GET', '/admin/ui/auth-mode')
+}
+
 export function whoami(): Promise<WhoAmI> {
   return request<WhoAmI>('GET', '/admin/ui/session')
 }

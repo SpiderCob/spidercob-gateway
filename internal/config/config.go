@@ -250,14 +250,30 @@ type Config struct {
 	// single introspection result can be; this bounds the UI session's
 	// own total lifetime.
 	AdminUISessionMaxAgeSeconds int `json:"admin_ui_session_max_age_seconds,omitempty"`
+
+	// LocalAdminGroup enables the admin API's standalone (no spider-snoop)
+	// login mode (issue #43): any local (Mode A) human in this group is a
+	// gateway admin, checked live on every request against real group
+	// membership, never a role baked into a token. Bootstrapping the
+	// first admin needs no new mechanism -- a SeedUsers entry whose
+	// groups include this name is already an admin from the first
+	// startup. Mutually exclusive with the spider-snoop integration
+	// fields (AdminIntegrationClientIDs/SpiderSnoopBaseURL) -- Load
+	// refuses a config that sets both, the same "fail loudly on an
+	// ambiguous combination" posture already applied to that pair.
+	// Empty (the default) means this admin-auth mode is off.
+	LocalAdminGroup string `json:"local_admin_group,omitempty"`
 }
 
 // AdminAPIEnabled reports whether internal/adminapi's routes should be
-// mounted at all -- both AdminIntegrationClientIDs and SpiderSnoopBaseURL
-// must be set (Load already refuses a half-configured combination, so by
-// the time this is called it's an all-or-nothing question).
+// mounted at all -- true when either admin-auth mode is fully configured:
+// spider-snoop integration (AdminIntegrationClientIDs and
+// SpiderSnoopBaseURL, both required together -- Load already refuses a
+// half-configured combination) or standalone local-admin mode
+// (LocalAdminGroup). Load also refuses configuring both modes at once
+// (issue #43), so by the time this is called it's a clean either/or.
 func (c *Config) AdminAPIEnabled() bool {
-	return len(c.AdminIntegrationClientIDs) > 0 && c.SpiderSnoopBaseURL != ""
+	return (len(c.AdminIntegrationClientIDs) > 0 && c.SpiderSnoopBaseURL != "") || c.LocalAdminGroup != ""
 }
 
 // SeedAgent is one config-declared bootstrap NHI credential. See
@@ -398,13 +414,19 @@ func Load(path string) (*Config, error) {
 	if haveClientIDs != haveBaseURL {
 		return nil, fmt.Errorf("admin_integration_client_ids and spider_snoop_base_url must be set together (both, or neither) -- got client_ids=%v, base_url=%q", c.AdminIntegrationClientIDs, c.SpiderSnoopBaseURL)
 	}
-	if c.AdminAPIEnabled() {
+	spiderSnoopConfigured := haveClientIDs && haveBaseURL
+	if spiderSnoopConfigured && c.LocalAdminGroup != "" {
+		return nil, fmt.Errorf("local_admin_group and spider-snoop integration (admin_integration_client_ids/spider_snoop_base_url) must not both be set -- pick one admin-auth mode for this deployment, got local_admin_group=%q", c.LocalAdminGroup)
+	}
+	if spiderSnoopConfigured {
 		if c.SpiderSnoopIntrospectionTimeoutSeconds <= 0 {
 			c.SpiderSnoopIntrospectionTimeoutSeconds = DefaultSpiderSnoopIntrospectionTimeoutSeconds
 		}
 		if c.SpiderSnoopIntrospectionCacheTTLSeconds <= 0 {
 			c.SpiderSnoopIntrospectionCacheTTLSeconds = DefaultSpiderSnoopIntrospectionCacheTTLSeconds
 		}
+	}
+	if c.AdminAPIEnabled() {
 		if c.AdminUISessionMaxAgeSeconds <= 0 {
 			c.AdminUISessionMaxAgeSeconds = DefaultAdminUISessionMaxAgeSeconds
 		}

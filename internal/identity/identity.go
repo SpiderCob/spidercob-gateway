@@ -114,6 +114,28 @@ func (svc *Service) CreateAgent(ctx context.Context, name string) (agent store.A
 	return agent, secret, nil
 }
 
+// UserGroupNames returns the group names username currently belongs to,
+// resolved fresh from the store on every call -- used by the standalone
+// admin-login path (issue #43) to check admin-group membership live on
+// every request, never trusting a stale membership claim baked into a
+// session token. Returns an error (not an empty list) for an unknown
+// username, same as GetUser.
+func (svc *Service) UserGroupNames(ctx context.Context, username string) ([]string, error) {
+	u, err := svc.store.GetUserByUsername(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := svc.store.UserGroups(ctx, u.ID)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(groups))
+	for i, g := range groups {
+		names[i] = g.Name
+	}
+	return names, nil
+}
+
 // GetUser looks up a user by username with no credential check -- used by
 // the authserver's local-session re-exchange grant (issue #3, story 17),
 // where the caller has already proven identity via a still-valid signed

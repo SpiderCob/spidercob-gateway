@@ -77,6 +77,54 @@ func TestPasswordHashesAreSalted(t *testing.T) {
 	}
 }
 
+func TestUserGroupNames_ReflectsRealGroupMembership(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	svc := NewService(s)
+	ctx := context.Background()
+
+	u, err := svc.CreateUser(ctx, "alice", "s3cret-pw")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	names, err := svc.UserGroupNames(ctx, "alice")
+	if err != nil {
+		t.Fatalf("UserGroupNames (no groups yet): %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("UserGroupNames = %v, want none before any group assignment", names)
+	}
+
+	g, err := s.CreateGroup(ctx, "admin")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := s.AssignUserGroup(ctx, u.ID, g.ID); err != nil {
+		t.Fatalf("AssignUserGroup: %v", err)
+	}
+
+	names, err = svc.UserGroupNames(ctx, "alice")
+	if err != nil {
+		t.Fatalf("UserGroupNames: %v", err)
+	}
+	if len(names) != 1 || names[0] != "admin" {
+		t.Fatalf("UserGroupNames = %v, want [admin]", names)
+	}
+}
+
+func TestUserGroupNames_UnknownUsernameErrors(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	if _, err := svc.UserGroupNames(ctx, "nobody"); err == nil {
+		t.Fatal("expected an error for an unknown username")
+	}
+}
+
 func TestUserCreateAndAuthenticate(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

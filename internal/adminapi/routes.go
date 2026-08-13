@@ -67,6 +67,13 @@ type Config struct {
 	// gateway's live, traffic-facing MCP session state, not the browser
 	// admin-UI login concept.
 	MCPSessions MCPSessionManager
+	// LocalAdmin backs the standalone (no spider-snoop) admin login path
+	// (issue #43) -- nil in spider-snoop-integrated mode (or when
+	// neither admin-auth mode is configured), the only optional field
+	// here. When set, POST /admin/ui/session additionally accepts a
+	// username/password pair instead of a spider-snoop token, and
+	// GET /admin/ui/auth-mode reports "local" instead of "spider_snoop".
+	LocalAdmin LocalAdminAuthenticator
 }
 
 // AdminAPI serves the gateway's HTTP admin surface (issue #13).
@@ -77,6 +84,7 @@ type AdminAPI struct {
 	introspector SpiderSnoopIntrospector
 	uiSessions   *uisession.Registry
 	mcpSessions  MCPSessionManager
+	localAdmin   LocalAdminAuthenticator
 }
 
 // New builds an AdminAPI from cfg.
@@ -91,6 +99,7 @@ func New(cfg Config) (*AdminAPI, error) {
 		introspector: cfg.Introspector,
 		uiSessions:   cfg.UISessions,
 		mcpSessions:  cfg.MCPSessions,
+		localAdmin:   cfg.LocalAdmin,
 	}, nil
 }
 
@@ -148,6 +157,10 @@ func (a *AdminAPI) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/ui/session", a.createUISession)
 	mux.HandleFunc("GET /admin/ui/session", a.getUISession)
 	mux.HandleFunc("DELETE /admin/ui/session", a.deleteUISession)
+	// auth-mode (issue #43) tells the Login screen which credential shape
+	// this deployment actually accepts, before it renders anything --
+	// unauthenticated, same as the session endpoints just above.
+	mux.HandleFunc("GET /admin/ui/auth-mode", a.getAuthMode)
 	return mux
 }
 
