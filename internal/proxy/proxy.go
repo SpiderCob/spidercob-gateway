@@ -363,18 +363,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(body))
 	}
 
-	// The three branches below (missing session id, unknown/mismatched
-	// session, dead upstream) all fail a request that already passed
-	// every policy/pin/schema/scan gate above -- they're session-lifecycle
-	// or infrastructure failures on an already-authorized call, not a new
-	// authorization decision, so none of them call enqueueAudit. This is
-	// a deliberate exclusion (issue #45 spec), same category as the
-	// auth-failure/unknown-node returns earlier in this function -- named
-	// explicitly here since, unlike those two, these three happen *after*
-	// policy.Decide already returned Allowed, which is otherwise this
-	// function's one consistent signal for "this is audit-worthy."
+	// Three *failure* paths below -- missing session id (non-initialize),
+	// unknown/mismatched session, dead upstream -- all fail a request
+	// that already passed every policy/pin/schema/scan gate above.
+	// They're session-lifecycle or infrastructure failures on an
+	// already-authorized call, not a new authorization decision, so none
+	// of them call enqueueAudit. This is a deliberate exclusion (issue
+	// #45 spec), same category as the auth-failure/unknown-node returns
+	// earlier in this function -- named explicitly here since, unlike
+	// those two, these three happen *after* policy.Decide already
+	// returned Allowed, which is otherwise this function's one consistent
+	// signal for "this is audit-worthy." (Doesn't cover the sessionID==""
+	// block's own success sub-case just below -- a fresh "initialize"
+	// still calls enqueueAudit like every other allowed request; only its
+	// sibling "missing session id on a non-initialize call" branch is one
+	// of the three exclusions this comment describes.)
 	// (Flagged by Copilot's review on PR #46, after merge -- documented
-	// here as a direct follow-up.)
+	// here as a direct follow-up; wording corrected per Copilot's review
+	// on PR #47, also after merge.)
 	if sessionID == "" {
 		if rpcMethod != "initialize" {
 			http.Error(sr, "missing Mcp-Session-Id", http.StatusBadRequest)
