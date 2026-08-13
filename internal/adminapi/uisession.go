@@ -21,7 +21,13 @@ type createUISessionRequest struct {
 	// spider-snoop session token. v0's login UX is a manual paste (no
 	// redirect-based SSO yet -- a real spider-snoop-side change,
 	// deliberately deferred, see the issue #17 spec).
-	SpiderSnoopSessionToken string `json:"spider_snoop_session_token"`
+	SpiderSnoopSessionToken string `json:"spider_snoop_session_token,omitempty"`
+	// Username/Password are the standalone (no spider-snoop) local admin
+	// login alternative (issue #43) -- mutually exclusive with
+	// SpiderSnoopSessionToken; a request naming Username routes to
+	// createLocalAdminUISession instead of the spider-snoop path below.
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
 }
 
 type uiSessionResponse struct {
@@ -38,7 +44,17 @@ type uiSessionResponse struct {
 // cookie.
 func (a *AdminAPI) createUISession(w http.ResponseWriter, r *http.Request) {
 	var req createUISessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SpiderSnoopSessionToken == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Username != "" || req.Password != "" {
+		a.createLocalAdminUISession(w, r, req.Username, req.Password)
+		return
+	}
+
+	if req.SpiderSnoopSessionToken == "" {
 		writeAdminError(w, http.StatusBadRequest, "spider_snoop_session_token is required")
 		return
 	}

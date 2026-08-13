@@ -104,6 +104,13 @@ type Config struct {
 	// (the default) means no agent can mint one -- the admin API is
 	// unreachable, not open by omission.
 	AdminIntegrationClientIDs []string
+
+	// LocalAdminGroup enables LoginLocalAdmin/ValidateLocalAdminSession
+	// (issue #43, standalone admin login): any local user in this group
+	// is a gateway admin, checked live on every request. Empty (the
+	// default) means this admin-auth mode is off -- both methods return
+	// an error unconditionally.
+	LocalAdminGroup string
 }
 
 // AuthServer issues, publishes verification keys for, and validates this
@@ -121,6 +128,7 @@ type AuthServer struct {
 	sessionTTL time.Duration
 
 	adminIntegrationClientIDs map[string]struct{}
+	localAdminGroup           string
 }
 
 // New builds an AuthServer, generating its first signing key and
@@ -164,6 +172,7 @@ func New(ctx context.Context, cfg Config) (*AuthServer, error) {
 		humanTTL:                  cfg.HumanTokenTTL,
 		sessionTTL:                cfg.LocalSessionTTL,
 		adminIntegrationClientIDs: adminClientIDs,
+		localAdminGroup:           cfg.LocalAdminGroup,
 	}
 	if as.nhiTTL <= 0 {
 		as.nhiTTL = DefaultNHITokenTTL

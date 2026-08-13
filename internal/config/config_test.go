@@ -166,6 +166,36 @@ func TestLoad_AdminAPIEnabledWithBothFieldsSet(t *testing.T) {
 	}
 }
 
+func TestLoad_AdminAPIEnabledByLocalAdminGroupAlone(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"local_admin_group":"admin"}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AdminAPIEnabled() {
+		t.Fatal("AdminAPIEnabled() = false, want true when local_admin_group alone is set")
+	}
+	if cfg.LocalAdminGroup != "admin" {
+		t.Fatalf("LocalAdminGroup = %q, want admin", cfg.LocalAdminGroup)
+	}
+	if cfg.AdminUISessionMaxAgeSeconds != DefaultAdminUISessionMaxAgeSeconds {
+		t.Fatalf("AdminUISessionMaxAgeSeconds = %d, want default %d (uisession.Registry is shared by both admin-auth modes)", cfg.AdminUISessionMaxAgeSeconds, DefaultAdminUISessionMaxAgeSeconds)
+	}
+	// Spider-snoop-specific defaults must not be silently populated just
+	// because the admin API is enabled via the *other* mode -- they're
+	// meaningless without a spider-snoop integration to bound.
+	if cfg.SpiderSnoopIntrospectionTimeoutSeconds != 0 {
+		t.Fatalf("SpiderSnoopIntrospectionTimeoutSeconds = %d, want 0 (local-admin mode, no spider-snoop)", cfg.SpiderSnoopIntrospectionTimeoutSeconds)
+	}
+}
+
+func TestLoad_LocalAdminGroupAndSpiderSnoopIntegrationTogetherRejected(t *testing.T) {
+	path := writeConfig(t, `{"nodes":[],"local_admin_group":"admin","admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000"}`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error when local_admin_group and spider-snoop integration are both configured")
+	}
+}
+
 func TestLoad_AdminAPIOverridesApplied(t *testing.T) {
 	path := writeConfig(t, `{"nodes":[],"admin_integration_client_ids":["agt_spidersnoop"],"spider_snoop_base_url":"http://spider-snoop.internal:8000","spider_snoop_introspection_timeout_seconds":2,"spider_snoop_introspection_cache_ttl_seconds":10,"admin_ui_session_max_age_seconds":3600}`)
 	cfg, err := Load(path)

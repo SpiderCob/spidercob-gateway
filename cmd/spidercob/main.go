@@ -76,6 +76,33 @@ func (a adminMCPSessionManager) EndSession(ctx context.Context, id string) error
 	return err
 }
 
+// localAdminAuthenticator and localAdminIntrospector adapt
+// *authserver.AuthServer to adminapi.LocalAdminAuthenticator/
+// SpiderSnoopIntrospector for standalone (no spider-snoop) deployments
+// (issue #43) -- same composition-root adapter pattern as every other
+// adapter in this file. Both wrap the same AuthServer: Login mints a
+// local admin session token via LoginLocalAdmin, Introspect re-verifies
+// one (including a fresh, live admin-group re-check) via
+// ValidateLocalAdminSession -- the exact "verify this on every call"
+// shape SpiderSnoopIntrospector already has, so internal/adminapi's own
+// re-introspection-on-every-request code (checkUISessionCookie) needs no
+// changes at all to work with this second implementation.
+type localAdminAuthenticator struct{ as *authserver.AuthServer }
+
+func (l localAdminAuthenticator) Login(ctx context.Context, username, password string) (string, error) {
+	return l.as.LoginLocalAdmin(ctx, username, password)
+}
+
+type localAdminIntrospector struct{ as *authserver.AuthServer }
+
+func (l localAdminIntrospector) Introspect(ctx context.Context, humanToken string) (adminapi.IntrospectionResult, error) {
+	username, err := l.as.ValidateLocalAdminSession(ctx, humanToken)
+	if err != nil {
+		return adminapi.IntrospectionResult{}, err
+	}
+	return adminapi.IntrospectionResult{Username: username, Role: "admin"}, nil
+}
+
 // getOrCreateGroup resolves a group by name, creating it if it doesn't
 // already exist -- both SeedAgents.Groups and Policies reference groups by
 // name, auto-created rather than requiring a separate bootstrap step.
@@ -311,6 +338,7 @@ func main() {
 		HumanTokenTTL:             time.Duration(cfg.HumanTokenTTLSeconds) * time.Second,
 		LocalSessionTTL:           time.Duration(cfg.LocalSessionTTLSeconds) * time.Second,
 		AdminIntegrationClientIDs: cfg.AdminIntegrationClientIDs,
+		LocalAdminGroup:           cfg.LocalAdminGroup,
 	})
 	if err != nil {
 		slog.Error("failed to build authserver", "err", err)
@@ -356,16 +384,32 @@ func main() {
 	pinScheduler.Start()
 	defer pinScheduler.Stop()
 
-	// Admin API (issue #13): mounted only when both admin_integration_
-	// client_ids and spider_snoop_base_url are set -- config.Load already
-	// refuses a half-configured combination, so AdminAPIEnabled() here is
-	// a clean on/off switch, not a partial-state check.
+	// Admin API (issue #13): mounted when either admin-auth mode is fully
+	// configured -- spider-snoop integration (admin_integration_client_ids
+	// + spider_snoop_base_url) or standalone local-admin mode
+	// (local_admin_group). config.Load already refuses a half-configured
+	// spider-snoop combination and refuses configuring both modes at
+	// once, so AdminAPIEnabled() here is a clean on/off switch, and
+	// exactly one of the two branches below ever applies.
 	var adminAPI *adminapi.AdminAPI
 	if cfg.AdminAPIEnabled() {
-		introspector := adminapi.NewCachingIntrospector(
-			adminapi.NewHTTPIntrospector(cfg.SpiderSnoopBaseURL, time.Duration(cfg.SpiderSnoopIntrospectionTimeoutSeconds)*time.Second),
-			time.Duration(cfg.SpiderSnoopIntrospectionCacheTTLSeconds)*time.Second,
-		)
+		var introspector adminapi.SpiderSnoopIntrospector
+		var localAdmin adminapi.LocalAdminAuthenticator
+		if cfg.LocalAdminGroup != "" {
+			// Standalone mode (issue #43): both adapters wrap the same
+			// *authserver.AuthServer -- Login mints a local admin
+			// session token, Introspect re-verifies it (including a
+			// fresh, live admin-group re-check) on every subsequent
+			// request, the exact same "verify this on every call" shape
+			// SpiderSnoopIntrospector already has.
+			introspector = localAdminIntrospector{as: as}
+			localAdmin = localAdminAuthenticator{as: as}
+		} else {
+			introspector = adminapi.NewCachingIntrospector(
+				adminapi.NewHTTPIntrospector(cfg.SpiderSnoopBaseURL, time.Duration(cfg.SpiderSnoopIntrospectionTimeoutSeconds)*time.Second),
+				time.Duration(cfg.SpiderSnoopIntrospectionCacheTTLSeconds)*time.Second,
+			)
+		}
 		uiSessions := uisession.NewRegistry(uisession.RegistryConfig{
 			MaxAge: time.Duration(cfg.AdminUISessionMaxAgeSeconds) * time.Second,
 		})
@@ -376,12 +420,17 @@ func main() {
 			Introspector: introspector,
 			UISessions:   uiSessions,
 			MCPSessions:  adminMCPSessionManager{gw: gw},
+			LocalAdmin:   localAdmin,
 		})
 		if err != nil {
 			slog.Error("failed to build adminapi", "err", err)
 			os.Exit(1)
 		}
-		slog.Info("admin API enabled", "spider_snoop_base_url", cfg.SpiderSnoopBaseURL, "integration_agents", len(cfg.AdminIntegrationClientIDs))
+		if cfg.LocalAdminGroup != "" {
+			slog.Info("admin API enabled (standalone local-admin mode)", "local_admin_group", cfg.LocalAdminGroup)
+		} else {
+			slog.Info("admin API enabled", "spider_snoop_base_url", cfg.SpiderSnoopBaseURL, "integration_agents", len(cfg.AdminIntegrationClientIDs))
+		}
 	}
 
 	mux := http.NewServeMux()

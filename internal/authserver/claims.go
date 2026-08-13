@@ -15,6 +15,12 @@ import (
 const (
 	typAccess  = "at+jwt"      // node-scoped access token (RFC 9068-style typ)
 	typSession = "session+jwt" // Mode A human's re-exchangeable local session
+	// typLocalAdminSession is the standalone (no spider-snoop) admin UI
+	// session (issue #43) -- deliberately its own typ, not typSession: it
+	// must never be replayable as an ordinary MCP-session re-exchange
+	// token (which would mint real per-node access tokens), or vice
+	// versa.
+	typLocalAdminSession = "local-admin-session+jwt"
 )
 
 // Claims is this gateway's access-token payload. act is shaped to match
