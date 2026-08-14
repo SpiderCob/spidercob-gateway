@@ -108,6 +108,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Per-MCP-request audit trail — every proxied `tools/call`/`tools/list`/`initialize`, allowed or denied, now leaves a hash-chained `audit_log` row (async, bounded write queue so this never adds latency to the request path)
 - [x] goreleaser signed releases + `brew install` — pipeline built and proven end to end; `v0.1.0` tagged and verified live (real signed archives, real `cosign verify-blob` pass). `brew install` itself still isn't live — needs a separate tap repo that doesn't exist yet → **OSS launch**
 - [x] Signed, multi-arch container image on GHCR — same existing Dockerfile, published on every `v*` tag from here on (`v0.1.0` predates it, so the *next* tag is the first with an image); a real disposable push/pull/sign/verify/cleanup round trip against the actual registry passes on every PR touching this pipeline
+- [x] `spidercob connect` — a local sidecar (new subcommand of the same binary) that holds one long-lived credential and silently mints/refreshes short-lived tokens in the background, so an interactive MCP client (Claude Desktop/Code, Cursor) never has to babysit an expiring pasted token; run `spidercob connect -gateway <url> -client-id <id> -client-secret <secret> -node <name>` and point your client at the printed local URL instead
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
