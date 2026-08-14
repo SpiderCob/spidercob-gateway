@@ -15,14 +15,20 @@ Non-human identities (agents, service accounts) outnumber humans ~100:1 in most 
 ## Installing a release
 
 Every `v*` tag publishes signed, cross-platform binaries (`linux`/`darwin`
-× `amd64`/`arm64`) to the [Releases page](https://github.com/SpiderCob/spidercob-gateway/releases),
-signed keylessly via Sigstore/cosign — see [docs/verify-release.md](docs/verify-release.md)
+× `amd64`/`arm64`) to the [Releases page](https://github.com/SpiderCob/spidercob-gateway/releases)
+and a signed, multi-arch container image to
+`ghcr.io/spidercob/spidercob-gateway`, both signed keylessly via
+Sigstore/cosign — see [docs/verify-release.md](docs/verify-release.md)
 for how to verify a download actually came from this project's own CI.
 [`v0.1.0`](https://github.com/SpiderCob/spidercob-gateway/releases/tag/v0.1.0)
-is the first such release — a pre-launch tag proving the pipeline for
-real (repo is still private, not the official launch), verified end to
-end: real signed archives, a real `cosign verify-blob` pass against the
-published bundle, a real extracted binary run. `brew install
+is the first real release — a pre-launch tag proving the binary pipeline
+for real (repo is still private, not the official launch), verified end
+to end: real signed archives, a real `cosign verify-blob` pass against
+the published bundle, a real extracted binary run. It predates the
+container-image pipeline, though, so it has no image — the *next* tag
+will be the first with one (that pipeline is built and proven for real
+too: a disposable push/pull/sign/verify round trip against the actual
+registry passes on every PR that touches it). `brew install
 SpiderCob/tap/spidercob-gateway` isn't available yet — that needs a
 separate tap repository that doesn't exist yet — so the sections below
 are still how to run the gateway for now.
@@ -101,6 +107,7 @@ Full design: [docs/design.md](docs/design.md). Spec conformance tracking: [docs/
 - [x] Standalone admin login — local group-based admin access for no-spider-snoop deployments; the Login screen auto-detects which credential shape a deployment accepts
 - [x] Per-MCP-request audit trail — every proxied `tools/call`/`tools/list`/`initialize`, allowed or denied, now leaves a hash-chained `audit_log` row (async, bounded write queue so this never adds latency to the request path)
 - [x] goreleaser signed releases + `brew install` — pipeline built and proven end to end; `v0.1.0` tagged and verified live (real signed archives, real `cosign verify-blob` pass). `brew install` itself still isn't live — needs a separate tap repo that doesn't exist yet → **OSS launch**
+- [x] Signed, multi-arch container image on GHCR — same existing Dockerfile, published on every `v*` tag from here on (`v0.1.0` predates it, so the *next* tag is the first with an image); a real disposable push/pull/sign/verify/cleanup round trip against the actual registry passes on every PR touching this pipeline
 - [ ] v1.0: Okta/Keycloak certified interop, `spidercob-admin` MCP server (manage the gateway by talking to Claude)
 
 ## Contributing
