@@ -186,6 +186,19 @@ func storeNodeToConfigNode(n store.Node) config.Node {
 }
 
 func main() {
+	// "spidercob connect ..." (issue #52) dispatches to its own flag set
+	// and code path entirely, before flag.Parse() ever runs on the
+	// package-level FlagSet below -- flag.Parse() would otherwise choke
+	// on "connect" as an unrecognized non-flag argument. Anything else
+	// (no arguments, or an actual flag like "-config"/"-version") falls
+	// straight through to exactly today's existing gateway-serving
+	// behavior, byte-for-byte unchanged -- no existing invocation of
+	// this binary breaks.
+	if len(os.Args) > 1 && os.Args[1] == "connect" {
+		runConnect(os.Args[2:])
+		return
+	}
+
 	cfgPath := flag.String("config", "config.json", "path to gateway config file")
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
