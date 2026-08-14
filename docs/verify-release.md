@@ -1,12 +1,15 @@
 # Verifying a release
 
-Every release (issue #49) is signed keylessly via [Sigstore/cosign](https://www.sigstore.dev/) —
+Every release (issue #49) — both the binary archives and the container
+image (issue #51) — is signed keylessly via [Sigstore/cosign](https://www.sigstore.dev/) —
 using this repo's own GitHub Actions identity to sign, not a private key a
 maintainer generated and could lose, leak, or have to rotate. Verifying a
 download anchors trust in two specific values below, not just "run this
 command and see if it says OK."
 
-## What's published with each release
+## Binary releases
+
+### What's published with each release
 
 - `spidercob-gateway_<version>_<os>_<arch>.tar.gz` — one archive per
   platform (`linux`/`darwin` × `amd64`/`arm64`), each containing the
@@ -16,7 +19,7 @@ command and see if it says OK."
   `checksums.txt` (and therefore, transitively, every archive whose hash
   it contains).
 
-## Verify
+### Verify
 
 1. Install [cosign](https://docs.sigstore.dev/system_config/installation/) (`brew install cosign`, or see the link).
 2. Download `checksums.txt`, `checksums.txt.bundle`, and the archive for
@@ -49,6 +52,37 @@ command and see if it says OK."
 If both steps succeed, the archive you downloaded is byte-for-byte what
 this project's own CI built and published for that release — not a fork,
 not a tampered mirror, not a supply-chain substitution.
+
+## Container image
+
+Every `v*` tag also publishes a signed, multi-architecture (`linux/amd64`,
+`linux/arm64`) image to `ghcr.io/spidercob/spidercob-gateway`, tagged both
+with the exact release version and a floating `latest`. The signature
+covers the image's content-addressed **digest**, not either mutable tag —
+so it stays valid even after `latest` moves to point at a newer release.
+
+### Verify
+
+1. Install [cosign](https://docs.sigstore.dev/system_config/installation/), same as above.
+2. Resolve the digest for the tag you're about to run:
+
+   ```bash
+   docker pull ghcr.io/spidercob/spidercob-gateway:v0.1.0
+   digest=$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/spidercob/spidercob-gateway:v0.1.0)
+   ```
+
+3. Verify it — same two `--certificate-*` values as the binaries above,
+   because it's the same identity (this repo's own CI) signing both:
+
+   ```bash
+   cosign verify "$digest" \
+     --certificate-identity-regexp "^https://github\.com/SpiderCob/spidercob-gateway/" \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   ```
+
+`cosign verify` (for an OCI image, addressed by digest) is the sibling of
+`cosign verify-blob` (for a plain file) used for the binary archives
+above — same trust anchor, different artifact shape.
 
 ## Why keyless, not a GPG-signed checksum
 

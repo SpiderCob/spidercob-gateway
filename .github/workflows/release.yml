@@ -14,6 +14,14 @@ on:
       - '.goreleaser.yml'
       - 'cmd/spidercob/main.go'
       - '.github/workflows/release.yml'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+
+env:
+  # ghcr.io requires an all-lowercase image path -- the GitHub org login
+  # (SpiderCob) is mixed-case, so this is a literal, hardcoded lowercase
+  # string rather than derived from github.repository_owner (issue #51).
+  IMAGE: ghcr.io/spidercob/spidercob-gateway
 
 jobs:
   release:
@@ -21,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # publish the GitHub Release
+      packages: write # publish the container image to GHCR (issue #51)
       id-token: write # cosign keyless signing (Sigstore OIDC)
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +91,42 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
+      # Container image (issue #51) -- the deliberately-deferred half of
+      # #39's Docker packaging work, now closed out. Reuses the existing,
+      # already-tested Dockerfile completely unchanged (run-e2e-docker.sh
+      # still owns proving the image itself is correct); this only adds
+      # where the already-correct image gets published. A plain
+      # docker/build-push-action step, not goreleaser's native dockers:
+      # mechanism -- confirmed with the user: that mechanism expects a
+      # thin Dockerfile that copies in an already-built binary, not one
+      # doing its own full multi-stage build from source the way this
+      # one does.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push container image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+      # cosign sign (the OCI-image-signing sibling of .goreleaser.yml's
+      # sign-blob on the binary checksums) -- signs the resolved digest,
+      # not a mutable tag, so the signature can never be silently
+      # invalidated by a later push retagging `latest`. Same GitHub
+      # Actions OIDC identity already used for the binaries -- no new
+      # trust mechanism, no key to custody.
+      - name: cosign sign the pushed image
+        run: cosign sign --yes "${{ env.IMAGE }}@${{ steps.image.outputs.digest }}"
+
   snapshot-check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -104,3 +149,63 @@ jobs:
           # to exist (automation/run-e2e-release.sh already covers
           # everything else locally, Docker-free, in make ci).
           args: release --snapshot --clean --skip=publish,homebrew
+
+  # Real, disposable push/pull/sign/verify round trip against the real
+  # registry (issue #51) -- the container-image equivalent of
+  # snapshot-check above. run-e2e-docker.sh (make ci-docker) already
+  # proves the image itself is correct; the one thing that can't be
+  # dry-run locally is the actual push/pull/sign/verify chain against
+  # ghcr.io, which needs real package-write credentials and a real OIDC
+  # token. Pushes to a PR-scoped, disposable tag -- never touches
+  # `latest` or any real version tag -- and deletes that tag's package
+  # version afterward (always, even on failure) so no test clutter is
+  # left behind in the registry.
+  docker-image-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the disposable test tag, and delete it afterward
+      id-token: write # cosign keyless signing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v3
+      - name: compute a disposable, unique test tag
+        id: tag
+        run: echo "tag=pr-${{ github.event.pull_request.number }}-${{ github.run_id }}" >>"$GITHUB_OUTPUT"
+      - name: build and push a real, disposable test image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+      - name: pull it back down -- proves it's actually retrievable, not just that push exited 0
+        run: docker pull "${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}"
+      - name: sign the pushed digest for real
+        run: cosign sign --yes "${{ env.IMAGE }}@${{ steps.image.outputs.digest }}"
+      - name: verify that signature for real -- the exact command docs/verify-release.md documents
+        run: |
+          cosign verify "${{ env.IMAGE }}@${{ steps.image.outputs.digest }}" \
+            --certificate-identity-regexp "^https://github\.com/SpiderCob/spidercob-gateway/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: clean up -- delete the disposable test tag's package version
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version_id=$(gh api "/orgs/SpiderCob/packages/container/spidercob-gateway/versions" --paginate \
+            --jq ".[] | select(.metadata.container.tags[]? == \"${{ steps.tag.outputs.tag }}\") | .id" | head -1)
+          if [ -n "$version_id" ]; then
+            gh api -X DELETE "/orgs/SpiderCob/packages/container/spidercob-gateway/versions/$version_id"
+          else
+            echo "no package version found for tag ${{ steps.tag.outputs.tag }} -- nothing to clean up (push likely never succeeded)"
+          fi
