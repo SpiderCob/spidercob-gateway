@@ -193,6 +193,22 @@ rather than a cryptic "command not found."
   (`id-token: write`). Not part of `make ci-interop`/`make ci-docker` —
   no Docker, no network, runs in `make ci`.
 
+- **`run-e2e-connect.sh`** — issue #52's `spidercob connect` local
+  sidecar: builds the real binary (`connect` is a subcommand of the same
+  one), starts a real gateway with a deliberately short
+  `nhi_token_ttl_seconds` and two real stdio nodes, starts the sidecar
+  proxying both, and drives real MCP traffic through it with **no
+  Authorization header from the caller at all** — proving the sidecar
+  itself is what's attaching a valid, node-scoped credential. An
+  unconfigured node gets a real 404 from the sidecar, never a confusing
+  pass-through. The one property unique to this feature gets a real,
+  timed proof, not just unit-level reasoning: after waiting past the
+  real (short) token's actual expiry, a request through the *same
+  still-running* sidecar process still succeeds, unattended — the
+  background refresh loop genuinely re-minted it, not just the initial
+  mint working. Not part of `make ci-interop`/`make ci-docker` — no
+  Docker, no network beyond localhost, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

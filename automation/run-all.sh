@@ -37,3 +37,5 @@ echo
 "$script_dir/run-e2e-mcp-audit.sh"
 echo
 "$script_dir/run-e2e-release.sh"
+echo
+"$script_dir/run-e2e-connect.sh"
