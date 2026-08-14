@@ -12,6 +12,12 @@
 # yourself if you need it to persist.
 services:
   gateway:
+    # Default: build the image locally from the Dockerfile right here --
+    # works with just a source checkout, no registry access needed.
+    # Once a real tag has been published (issue #51), swap this for the
+    # signed, pre-built image instead -- no local build, no source
+    # checkout required at all:
+    #   image: ghcr.io/spidercob/spidercob-gateway:latest
     build:
       context: .
     ports: ["8080:8080"]
