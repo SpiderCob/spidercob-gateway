@@ -248,6 +248,40 @@ rather than a cryptic "command not found."
   once. Not part of `make ci-interop`/`make ci-docker` — no Docker, no
   network beyond localhost, runs in `make ci`.
 
+- **`run-e2e-spidercob-admin.sh`** — issue #59's spidercob-admin (the
+  gateway as its own MCP server, design doc §9.1): drives the real
+  compiled binary, a real stdio node (`pinserver`, the same fixture
+  `run-e2e-pin.sh` already uses, for a real rug-pull scenario), and a
+  real fake spider-snoop. 24 checks proving the whole loop end to end
+  against the real, unmodified go-sdk `StreamableHTTPHandler` running
+  in-process — not a mock of the MCP protocol: unreachable by default
+  (a policy-less caller gets the identical `403` any other denied node
+  gets); reachable only after a real policy grant made through the
+  existing REST admin API (the one thing that has to happen first);
+  real `tools/list` returns all seven tools with real, go-sdk-inferred
+  JSON schemas; `list_nodes` matches the real `GET /admin/nodes`;
+  `grant_access` without `confirm` changes zero real policy rows (cross-
+  checked against the real REST `GET /admin/policies`) and describes
+  what would happen; the same call with `confirm:true` creates a real
+  row, visible through the REST API, and leaves a real, specific audit
+  entry (`mcp_grant_access`, not just a generic tool-call record);
+  `kill_session` actually ends a real session (a subsequent request
+  against it gets a real `404`); and a real quarantine — triggered by
+  actually rewriting `pinserver`'s tool description mid-run and waiting
+  for a real background refresh cycle to catch it, exactly like
+  `run-e2e-pin.sh` — is listed by `list_quarantined_tools` and cleared
+  by a real `approve_tool` call, which re-fetches the tool's live
+  definition rather than trusting the stale one. A real, useful finding
+  hit while writing this script, not a defect: the go-sdk's
+  `StreamableHTTPHandler` is spec-strict about `Content-Type: application/json`
+  and `Accept: application/json, text/event-stream` on every request —
+  stricter than the gateway's own hand-rolled JSON-RPC parsing for
+  ordinary nodes, which every other e2e script's bare `curl -d` calls
+  get away with. A real MCP client already sends both headers; this
+  script's own curl calls needed to start doing so explicitly. Not part
+  of `make ci-interop`/`make ci-docker` — no Docker, no network beyond
+  localhost, runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

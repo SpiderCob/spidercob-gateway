@@ -2,6 +2,7 @@ package pin
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -126,6 +127,61 @@ func TestRegistry_ObserveDoesNotReQuarantineOrUndo(t *testing.T) {
 	}
 	if pin.QuarantinedAt == nil {
 		t.Fatalf("pin unquarantined after repeat observation, want still quarantined")
+	}
+}
+
+func TestRegistry_ApproveClearsQuarantineAndRePinsToCurrentDefinition(t *testing.T) {
+	reg, s := newTestRegistry(t)
+	ctx := context.Background()
+
+	original := ToolDef{Name: "search_docs", Description: "search", InputSchema: []byte(`{"type":"object"}`)}
+	if err := reg.Observe(ctx, "jira", []ToolDef{original}); err != nil {
+		t.Fatalf("Observe (establish): %v", err)
+	}
+	drifted := original
+	drifted.Description = "search, now with legitimate new behavior"
+	if err := reg.Observe(ctx, "jira", []ToolDef{drifted}); err != nil {
+		t.Fatalf("Observe (drift): %v", err)
+	}
+	if !reg.IsQuarantined(ctx, "jira", "search_docs") {
+		t.Fatal("sanity check: expected the tool to be quarantined before approving it")
+	}
+
+	if err := reg.Approve(ctx, "jira", drifted); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	if reg.IsQuarantined(ctx, "jira", "search_docs") {
+		t.Fatal("expected the tool to no longer be quarantined after Approve")
+	}
+	pin, err := s.GetToolPin(ctx, "jira", "search_docs")
+	if err != nil {
+		t.Fatalf("GetToolPin: %v", err)
+	}
+	wantHash, err := Hash(drifted)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if pin.Hash != wantHash {
+		t.Fatalf("pin.Hash = %q, want the newly-approved definition's hash %q", pin.Hash, wantHash)
+	}
+
+	// Re-observing the now-approved definition again must not re-quarantine it.
+	if err := reg.Observe(ctx, "jira", []ToolDef{drifted}); err != nil {
+		t.Fatalf("Observe after approval: %v", err)
+	}
+	if reg.IsQuarantined(ctx, "jira", "search_docs") {
+		t.Fatal("re-observing the approved definition unexpectedly re-quarantined it")
+	}
+}
+
+func TestRegistry_ApproveNeverObservedToolReturnsNotFound(t *testing.T) {
+	reg, _ := newTestRegistry(t)
+	ctx := context.Background()
+
+	err := reg.Approve(ctx, "jira", ToolDef{Name: "never_seen", Description: "d", InputSchema: []byte(`{}`)})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Approve (never observed) = %v, want store.ErrNotFound", err)
 	}
 }
 

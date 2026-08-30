@@ -599,6 +599,48 @@ func (s *SQLiteStore) ToolPinsForNode(ctx context.Context, node string) ([]ToolP
 	return out, rows.Err()
 }
 
+func (s *SQLiteStore) ListQuarantinedToolPins(ctx context.Context) ([]ToolPin, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, node, tool_name, hash, input_schema, pinned_at, quarantined_at, drift_detail
+		 FROM tool_pins WHERE quarantined_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ToolPin
+	for rows.Next() {
+		var p ToolPin
+		if err := rows.Scan(&p.ID, &p.Node, &p.ToolName, &p.Hash, &p.InputSchema, &p.PinnedAt, &p.QuarantinedAt, &p.DriftDetail); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) ApproveToolPin(ctx context.Context, node, toolName, newHash, newInputSchema string) error {
+	var schema any // NULL when empty, same convention CreateToolPin already uses
+	if newInputSchema != "" {
+		schema = newInputSchema
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tool_pins SET hash = ?, input_schema = ?, pinned_at = CURRENT_TIMESTAMP,
+		 quarantined_at = NULL, drift_detail = NULL
+		 WHERE node = ? AND tool_name = ?`, newHash, schema, node, toolName)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLiteStore) CreateNode(ctx context.Context, n Node) (Node, error) {
 	argsJSON, err := marshalNodeArgs(n.Args)
 	if err != nil {
