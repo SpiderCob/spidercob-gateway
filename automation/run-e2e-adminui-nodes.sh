@@ -3,8 +3,9 @@
 # session (issue #17) extended to /admin/nodes, against the real compiled
 # binary. Narrowly scoped on purpose -- this proves "the cookie is now
 # accepted here too," not "node registration works end to end" (that's
-# already run-e2e-nodes.sh's job, including the real restart-required
-# proof, and is deliberately not re-tested here).
+# already run-e2e-nodes.sh's (restart-persistence) and
+# run-e2e-hot-reload.sh's (issue #57, no-restart-needed) jobs, and is
+# deliberately not re-tested here).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

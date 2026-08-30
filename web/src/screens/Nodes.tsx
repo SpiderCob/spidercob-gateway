@@ -10,12 +10,6 @@ export default function Nodes() {
   const [error, setError] = useState<string | null>(null)
   const [draft, setDraft] = useState<CreateNodeInput>(emptyDraft())
   const [creating, setCreating] = useState(false)
-  // justRegistered holds the name of a node this browser just created,
-  // so the restart-required notice stays attached to that specific row
-  // (and to a summary banner) rather than implying every listed node is
-  // in the same not-yet-reachable state -- most rows in a real deployment
-  // won't be.
-  const [justRegistered, setJustRegistered] = useState<string | null>(null)
 
   async function refresh() {
     try {
@@ -69,8 +63,7 @@ export default function Nodes() {
     setCreating(true)
     setError(null)
     try {
-      const created = await createNode(payload)
-      setJustRegistered(created.name)
+      await createNode(payload)
       setDraft(emptyDraft())
       await refresh()
     } catch (err) {
@@ -84,7 +77,6 @@ export default function Nodes() {
     setError(null)
     try {
       await deleteNode(name)
-      if (justRegistered === name) setJustRegistered(null)
       await refresh()
     } catch (err) {
       // A config-sourced node's delete is refused (409) with an
@@ -99,14 +91,6 @@ export default function Nodes() {
     <section>
       <h2>Nodes</h2>
       {error && <div className="error">{error}</div>}
-
-      {justRegistered && (
-        <div className="restart-banner">
-          Node <strong>{justRegistered}</strong> is registered, but it will not route traffic or
-          accept a minted token until the gateway is restarted (no hot-reload yet). Restart the
-          gateway process, then it will be reachable.
-        </div>
-      )}
 
       <form onSubmit={handleCreate} className="inline-form">
         <input
@@ -181,15 +165,7 @@ export default function Nodes() {
           <tbody>
             {nodes.map((n) => (
               <tr key={n.name}>
-                <td>
-                  {n.name}
-                  {justRegistered === n.name && (
-                    <span className="restart-badge" title="Not yet reachable -- restart the gateway">
-                      {' '}
-                      (restart required)
-                    </span>
-                  )}
-                </td>
+                <td>{n.name}</td>
                 <td>{n.transport}</td>
                 <td>{n.upstream_url ?? [n.command, ...(n.args ?? [])].filter(Boolean).join(' ')}</td>
                 <td>{n.source}</td>

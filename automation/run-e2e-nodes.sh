@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Real end-to-end smoke test for issue #15 (Phase 4b: node registration):
-# drives the actual compiled binary through a real POST /admin/nodes call,
-# then a real restart of the same binary against the same store_db_path --
-# not simulated with mocks -- to prove the "restart required, no hot-
-# reload" behavior this issue deliberately ships with (MASTER_PLAN.md §6,
-# 2026-08-08), not just assert it in a doc comment.
+# Real end-to-end smoke test for issue #15 (Phase 4b: node registration),
+# updated by issue #57 (hot-reload): drives the actual compiled binary
+# through a real POST /admin/nodes call, proves the node is immediately
+# usable on the same still-running process (hot-reload, issue #57 --
+# this used to assert the *opposite*, "not yet reachable until restart";
+# that assertion is what issue #57 existed to make false, and now is),
+# then restarts the same binary against the same store_db_path to prove
+# the node's registration genuinely persisted and survives a restart too
+# -- a real, separate property from "works without a restart," not a
+# redundant re-check of it. run-e2e-hot-reload.sh (issue #57) is the
+# thorough, dedicated hot-reload proof (creation, deletion, an
+# in-flight session surviving deletion); this script's own remaining job
+# is the restart-persistence half specifically.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -130,11 +137,19 @@ list_nodes_body=$(curl -sS "${base}/admin/nodes" \
 	-H "X-Spidercob-Admin-Session: whatever-spider-snoop-session-token")
 check_contains "registered node appears in GET /admin/nodes" "$list_nodes_body" '"name":"echo"'
 
-echo "==> THE DoD MOMENT (part 1): the node is NOT yet reachable on the still-running process"
-not_yet_reachable_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/echo/" \
-	-H "Authorization: Bearer ${admin_token}" \
+echo "==> the node is reachable on this SAME still-running process, no restart (issue #57 hot-reload)"
+echo_token_body=$(curl -sS -X POST "${base}/token" \
+	--data-urlencode "grant_type=client_credentials" \
+	--data-urlencode "client_id=agt-spidersnoop-backend" \
+	--data-urlencode "client_secret=integration-secret" \
+	--data-urlencode "resource=echo")
+echo_token=$(json_field "$echo_token_body" "access_token")
+check "a real per-node token mints with zero restart" "$([[ -n "$echo_token" ]] && echo yes || echo no)" "yes"
+
+init_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${echo_token}" \
 	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
-check "unrestarted gateway does not yet route to the new node" "$not_yet_reachable_status" "404"
+check "the unrestarted gateway routes to the just-registered node" "$init_status" "200"
 
 echo "==> restarting the gateway (same binary, same config, same store_db_path)"
 kill "$gw_pid" 2>/dev/null || true
@@ -145,31 +160,27 @@ gw_pid=""
 gw_pid=$!
 wait_healthy
 
-echo "==> THE DoD MOMENT (part 2): after a real restart, the node is really reachable"
-# The admin-scoped token from before is aud-restricted to the admin
-# resource and would never validate against a real MCP node (by design,
-# issue #13) -- mint an ordinary per-node token for "echo" now that the
-# restarted process's authserver actually knows about it.
-echo_token_body=$(curl -sS -X POST "${base}/token" \
+echo "==> THE DoD MOMENT: the node's registration genuinely persisted across a real restart"
+post_restart_token_body=$(curl -sS -X POST "${base}/token" \
 	--data-urlencode "grant_type=client_credentials" \
 	--data-urlencode "client_id=agt-spidersnoop-backend" \
 	--data-urlencode "client_secret=integration-secret" \
 	--data-urlencode "resource=echo")
-echo_token=$(json_field "$echo_token_body" "access_token")
-check "a real per-node token can now be minted for the admin-registered node" "$([[ -n "$echo_token" ]] && echo yes || echo no)" "yes"
+post_restart_token=$(json_field "$post_restart_token_body" "access_token")
+check "a real per-node token can still be minted after a real restart" "$([[ -n "$post_restart_token" ]] && echo yes || echo no)" "yes"
 
 init_headers="$work_dir/init_headers.txt"
-init_status=$(curl -sS -D "$init_headers" -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/echo/" \
-	-H "Authorization: Bearer ${echo_token}" \
+init_status2=$(curl -sS -D "$init_headers" -o /dev/null -w '%{http_code}' -X POST "${base}/mcp/echo/" \
+	-H "Authorization: Bearer ${post_restart_token}" \
 	-d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
-check "restarted gateway routes to the admin-registered node" "$init_status" "200"
+check "restarted gateway still routes to the persisted node" "$init_status2" "200"
 session_id=$(grep -i '^Mcp-Session-Id:' "$init_headers" | sed -E 's/^[Mm]cp-[Ss]ession-[Ii]d: *//' | tr -d '\r\n')
-check "a real session was established against the newly-reachable node" "$([[ -n "$session_id" ]] && echo yes || echo no)" "yes"
+check "a real session was established post-restart" "$([[ -n "$session_id" ]] && echo yes || echo no)" "yes"
 
 call_body=$(curl -sS -X POST "${base}/mcp/echo/" \
-	-H "Authorization: Bearer ${echo_token}" -H "Mcp-Session-Id: ${session_id}" \
-	-d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"node registration works"}}}')
-check_contains "a real tool call against the admin-registered node actually works" "$call_body" "node registration works"
+	-H "Authorization: Bearer ${post_restart_token}" -H "Mcp-Session-Id: ${session_id}" \
+	-d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"node registration persists across a restart"}}}')
+check_contains "a real tool call against the persisted node actually works" "$call_body" "node registration persists across a restart"
 
 echo
 echo "==> ${pass} passed, ${fail} failed"

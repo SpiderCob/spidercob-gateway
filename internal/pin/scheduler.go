@@ -72,14 +72,20 @@ type Scheduler struct {
 	registry        *Registry
 	fetch           Fetcher
 	clock           func() time.Time
-	nodes           []string
-	intervals       map[string]time.Duration
 	defaultInterval time.Duration
 	checkInterval   time.Duration
 	fetchTimeout    time.Duration
 
-	mu      sync.Mutex
-	lastRun map[string]time.Time
+	// mu guards nodes, intervals, and lastRun. Before issue #57, nodes
+	// and intervals were unguarded -- safe only because they were
+	// written once, in NewScheduler, before Start could possibly run.
+	// AddNode/RemoveNode (node_registry.go) can now mutate them
+	// concurrently with RunOnce's reads on the background loop's own
+	// goroutine.
+	mu        sync.Mutex
+	nodes     []string
+	intervals map[string]time.Duration
+	lastRun   map[string]time.Time
 
 	stop chan struct{}
 	done chan struct{}
@@ -108,12 +114,19 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if fetchTimeout <= 0 {
 		fetchTimeout = DefaultFetchTimeout
 	}
+	intervals := cfg.Intervals
+	if intervals == nil {
+		// AddNode (issue #57) writes into this map after construction --
+		// it must never be nil, even when the caller left Intervals
+		// unset (the common case: no per-node overrides at startup).
+		intervals = make(map[string]time.Duration)
+	}
 	return &Scheduler{
 		registry:        cfg.Registry,
 		fetch:           cfg.Fetch,
 		clock:           clock,
 		nodes:           cfg.Nodes,
-		intervals:       cfg.Intervals,
+		intervals:       intervals,
 		defaultInterval: cfg.DefaultInterval,
 		checkInterval:   checkInterval,
 		fetchTimeout:    fetchTimeout,
@@ -123,6 +136,9 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 }
 
+// intervalFor is called with s.mu already held by its only caller,
+// RunOnce -- unlike lastRun's own lock/unlock-per-access pattern, folding
+// this into RunOnce's single snapshot avoids a lock per node per tick.
 func (s *Scheduler) intervalFor(node string) time.Duration {
 	if iv, ok := s.intervals[node]; ok {
 		return iv
@@ -139,15 +155,20 @@ func (s *Scheduler) intervalFor(node string) time.Duration {
 // with a fake clock and Fetcher -- no goroutines or real waits involved.
 func (s *Scheduler) RunOnce(ctx context.Context) {
 	now := s.clock()
+
+	// Decide which nodes are due under one lock, then release it before
+	// any actual fetch -- a fetch can take up to fetchTimeout, and
+	// AddNode/RemoveNode (issue #57) must never block on that.
+	s.mu.Lock()
+	var toRefresh []string
 	for _, node := range s.nodes {
-		s.mu.Lock()
-		last := s.lastRun[node]
-		s.mu.Unlock()
-
-		if !dueForRefresh(last, s.intervalFor(node), now) {
-			continue
+		if dueForRefresh(s.lastRun[node], s.intervalFor(node), now) {
+			toRefresh = append(toRefresh, node)
 		}
+	}
+	s.mu.Unlock()
 
+	for _, node := range toRefresh {
 		fetchCtx, cancel := context.WithTimeout(ctx, s.fetchTimeout)
 		tools, err := s.fetch(fetchCtx, node)
 		cancel()

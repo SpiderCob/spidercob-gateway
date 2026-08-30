@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -120,8 +121,15 @@ type AuthServer struct {
 	identity *identity.Service
 	idpTrust *idptrust.TrustStore // nil means Mode B is disabled entirely
 	keys     *KeySet
-	nodes    map[string]struct{}
 	denylist *denylist
+
+	// nodesMu guards nodes -- unguarded before issue #57, when it was
+	// only ever written once, during New, before any HTTP handler could
+	// possibly run. AddNode/RemoveNode (node_registry.go) can now mutate
+	// it concurrently with the read sites below (resolveNode,
+	// ServeProtectedResourceMetadata) on other goroutines.
+	nodesMu sync.RWMutex
+	nodes   map[string]struct{}
 
 	nhiTTL     time.Duration
 	humanTTL   time.Duration
@@ -232,6 +240,8 @@ func (a *AuthServer) resolveNode(resource string) (node string, ok bool) {
 	if resource == "" {
 		return "", false
 	}
+	a.nodesMu.RLock()
+	defer a.nodesMu.RUnlock()
 	if _, exists := a.nodes[resource]; exists {
 		return resource, true
 	}
@@ -381,7 +391,10 @@ func (a *AuthServer) ServeJWKS(w http.ResponseWriter, r *http.Request) {
 // /.well-known/oauth-protected-resource/{node}.
 func (a *AuthServer) ServeProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	node := strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource/")
-	if _, ok := a.nodes[node]; !ok {
+	a.nodesMu.RLock()
+	_, ok := a.nodes[node]
+	a.nodesMu.RUnlock()
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}

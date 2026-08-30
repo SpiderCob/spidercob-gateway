@@ -41,3 +41,5 @@ echo
 "$script_dir/run-e2e-connect.sh"
 echo
 "$script_dir/run-e2e-stream-scan.sh"
+echo
+"$script_dir/run-e2e-hot-reload.sh"

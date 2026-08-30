@@ -69,22 +69,32 @@ type Config struct {
 	MCPSessions MCPSessionManager
 	// LocalAdmin backs the standalone (no spider-snoop) admin login path
 	// (issue #43) -- nil in spider-snoop-integrated mode (or when
-	// neither admin-auth mode is configured), the only optional field
-	// here. When set, POST /admin/ui/session additionally accepts a
+	// neither admin-auth mode is configured), an optional field. When
+	// set, POST /admin/ui/session additionally accepts a
 	// username/password pair instead of a spider-snoop token, and
 	// GET /admin/ui/auth-mode reports "local" instead of "spider_snoop".
 	LocalAdmin LocalAdminAuthenticator
+	// NodeRegistrar backs live node registration (issue #57, hot-reload)
+	// -- also optional, same "start permissive, the composition root
+	// opts a real backend in once its dependencies exist" posture
+	// internal/proxy's SetPolicy/SetPinRegistry/SetAuditRecorder already
+	// take. Nil means createNode/deleteNode fall back to exactly
+	// today's behavior: the store write succeeds, but the node needs a
+	// restart before it's actually reachable -- no live-apply attempted
+	// at all, not a silently-failing one.
+	NodeRegistrar NodeRegistrar
 }
 
 // AdminAPI serves the gateway's HTTP admin surface (issue #13).
 type AdminAPI struct {
-	store        store.Store
-	identity     *identity.Service
-	authn        AdminTokenValidator
-	introspector SpiderSnoopIntrospector
-	uiSessions   *uisession.Registry
-	mcpSessions  MCPSessionManager
-	localAdmin   LocalAdminAuthenticator
+	store         store.Store
+	identity      *identity.Service
+	authn         AdminTokenValidator
+	introspector  SpiderSnoopIntrospector
+	uiSessions    *uisession.Registry
+	mcpSessions   MCPSessionManager
+	localAdmin    LocalAdminAuthenticator
+	nodeRegistrar NodeRegistrar
 }
 
 // New builds an AdminAPI from cfg.
@@ -93,13 +103,14 @@ func New(cfg Config) (*AdminAPI, error) {
 		return nil, fmt.Errorf("adminapi: Store, Identity, Authn, Introspector, UISessions, and MCPSessions are all required")
 	}
 	return &AdminAPI{
-		store:        cfg.Store,
-		identity:     cfg.Identity,
-		authn:        cfg.Authn,
-		introspector: cfg.Introspector,
-		uiSessions:   cfg.UISessions,
-		mcpSessions:  cfg.MCPSessions,
-		localAdmin:   cfg.LocalAdmin,
+		store:         cfg.Store,
+		identity:      cfg.Identity,
+		authn:         cfg.Authn,
+		introspector:  cfg.Introspector,
+		uiSessions:    cfg.UISessions,
+		mcpSessions:   cfg.MCPSessions,
+		localAdmin:    cfg.LocalAdmin,
+		nodeRegistrar: cfg.NodeRegistrar,
 	}, nil
 }
 
@@ -663,10 +674,17 @@ type createNodeRequest struct {
 // validation config.Load already enforces for config.json-declared
 // nodes, so the two entry points can never silently diverge on what
 // counts as a valid node (story 10). Always creates a "admin"-sourced
-// row; a node registered this way is persisted and listed immediately,
-// but -- like every node -- only becomes reachable via /mcp/<name>/ or
-// mintable via /token after the next gateway restart (story 8; no hot-
-// reload yet, MASTER_PLAN.md §6, 2026-08-08).
+// row; the store write is the authoritative record, applied first. If a
+// NodeRegistrar is wired in (issue #57, hot-reload), the node is also
+// applied live to the already-running gateway -- routable and mintable
+// immediately, no restart -- but a live-apply failure only logs
+// (slog.Error, naming the node), it never turns this already-succeeded
+// store write into a failed request: the store is still correct, and a
+// restart remains a safe fallback for this one node, same "store
+// succeeded, live-apply is best-effort" posture logAdminAction's audit
+// write already takes. A nil NodeRegistrar (not wired in this
+// deployment/test) skips live-apply entirely -- exactly today's
+// restart-required behavior, not a silently-failing one.
 func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
 	var req createNodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -703,6 +721,11 @@ func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "failed to create node")
 		return
 	}
+	if a.nodeRegistrar != nil {
+		if err := a.nodeRegistrar.AddNode(validated); err != nil {
+			slog.Error("adminapi: node created in the store but live registration failed; a restart is still needed for this node", "node", created.Name, "err", err)
+		}
+	}
 	a.logAdminAction(r, "create_node", created.Name)
 	writeJSON(w, http.StatusCreated, toNodeResponse(created))
 }
@@ -710,6 +733,11 @@ func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
 // deleteNode refuses to delete a "config"-sourced node (story 5): doing
 // so via this API would just have it reappear on the very next restart,
 // since config.json is upserted back into the store on every startup.
+// Like createNode, applies live to the running gateway (issue #57) via
+// NodeRegistrar after the store delete succeeds -- an in-flight session
+// already on this node keeps working (RemoveNode's own doc comment,
+// story 5); only *new* sessions/mints are blocked immediately. Same
+// best-effort, log-don't-fail posture as createNode's live-apply.
 func (a *AdminAPI) deleteNode(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	existing, err := a.store.GetNodeByName(r.Context(), name)
@@ -735,6 +763,11 @@ func (a *AdminAPI) deleteNode(w http.ResponseWriter, r *http.Request) {
 		}
 		writeAdminError(w, http.StatusInternalServerError, "failed to delete node")
 		return
+	}
+	if a.nodeRegistrar != nil {
+		if err := a.nodeRegistrar.RemoveNode(name); err != nil {
+			slog.Error("adminapi: node deleted from the store but live removal failed; a restart is still needed to fully remove this node", "node", name, "err", err)
+		}
 	}
 	a.logAdminAction(r, "delete_node", name)
 	w.WriteHeader(http.StatusNoContent)
