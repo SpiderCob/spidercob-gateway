@@ -80,7 +80,13 @@ func AuthClaimsFromContext(ctx context.Context) (AuthClaims, bool) {
 }
 
 type Gateway struct {
-	nodes    map[string]*nodeConfig
+	// nodesMu guards nodes -- unguarded before issue #57, when it was
+	// only ever written once, during New, before ServeHTTP could
+	// possibly run. AddNode/RemoveNode (node_registry.go) can now mutate
+	// it concurrently with routing reads on other goroutines.
+	nodesMu sync.RWMutex
+	nodes   map[string]*nodeConfig
+
 	sessions *sessionManager
 	policy   policy.Engine
 	pins     *pin.Registry
@@ -145,13 +151,9 @@ func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
 		maxStreamBytes: defaultMaxStreamBytes,
 	}
 	for _, n := range cfg.Nodes {
-		nc := &nodeConfig{name: n.Name, transport: n.Transport, command: n.Command, args: n.Args}
-		if n.Transport == config.TransportStreamableHTTP {
-			u, err := url.Parse(n.UpstreamURL)
-			if err != nil {
-				return nil, fmt.Errorf("node %s: %w", n.Name, err)
-			}
-			nc.upstreamURL = u
+		nc, err := buildNodeConfig(n)
+		if err != nil {
+			return nil, err
 		}
 		g.nodes[n.Name] = nc
 	}
@@ -263,10 +265,26 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		metrics.UpstreamDuration.Observe(time.Since(start).Seconds(), nodeName)
 	}()
 
-	nc, ok := g.nodes[nodeName]
-	if !ok {
-		http.Error(sr, "unknown MCP node", http.StatusNotFound)
-		return
+	g.nodesMu.RLock()
+	nc, nodeExists := g.nodes[nodeName]
+	g.nodesMu.RUnlock()
+
+	// A node that isn't currently registered is still reachable if a
+	// request carries a session ID that's already live on it (issue #57
+	// story 5: RemoveNode doesn't kill sessions already in flight -- only
+	// new ones). Read Mcp-Session-Id early, before authentication, just
+	// for this check; the normal read further down still governs actual
+	// dispatch. Any other unknown-node request (no session at all, or a
+	// session ID that doesn't map to this node) is rejected exactly as
+	// before, before authentication even runs -- not revealing anything
+	// beyond "this node was never valid."
+	if !nodeExists {
+		earlySessionID := r.Header.Get("Mcp-Session-Id")
+		sess, liveOnThisNode := g.sessions.get(earlySessionID)
+		if earlySessionID == "" || !liveOnThisNode || sess.node != nodeName {
+			http.Error(sr, "unknown MCP node", http.StatusNotFound)
+			return
+		}
 	}
 
 	// Validate bearer token: signature, exp, aud == this node's canonical

@@ -82,14 +82,3 @@ tr.revoked {
   white-space: pre-wrap;
   word-break: break-all;
 }
-
-/* Distinct tone from .secret-banner on purpose (issue #19): this is a
-   "pay attention, restart needed" notice, not a one-time-secret warning
-   -- info blue, not the same warning-amber the secret banner uses. */
-.restart-banner {
-  border: 2px solid var(--info);
-  background: var(--info-bg);
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
-  margin: 1rem 0;
-}

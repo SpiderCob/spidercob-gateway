@@ -95,7 +95,7 @@ rather than a cryptic "command not found."
   store-visible effects via the same API afterward. Not part of
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
-- **`run-e2e-nodes.sh`** — issue #15's node registration (Phase 4b), against the real compiled binary, including a real process restart: a node is registered via `POST /admin/nodes` against a gateway running with zero configured MCP nodes, confirmed listed immediately, confirmed **not yet reachable** on the still-running process (`/mcp/echo/` 404s, and minting a per-node token for it fails) — then the same binary is actually killed and relaunched against the same `store_db_path`, and the node is confirmed reachable afterward: a real session, a real `tools/call`. Proves the "restart required, no hot-reload" behavior against the real process lifecycle, not just a doc comment. Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
+- **`run-e2e-nodes.sh`** — issue #15's node registration (Phase 4b), against the real compiled binary, including a real process restart; updated by issue #57 (hot-reload) since its original DoD moment — the node being **not yet reachable** before a restart — was exactly the behavior issue #57 exists to make false. Now: a node is registered via `POST /admin/nodes` against a gateway running with zero configured MCP nodes, confirmed listed immediately, confirmed **already reachable on that same still-running process** (a real per-node token mints, `/mcp/echo/` routes) — then the same binary is actually killed and relaunched against the same `store_db_path`, and the node is confirmed to still be reachable afterward: a real session, a real `tools/call`. Proves the node's registration genuinely *persists* across a real restart against the real process lifecycle, not that a restart is required — `run-e2e-hot-reload.sh` (issue #57) is the dedicated, thorough no-restart-needed proof. Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
 
 - **`run-e2e-adminui-session.sh`** — issue #17's admin UI session/cookie
   path (Phase 4c-1), against the real compiled binary and the same
@@ -226,6 +226,27 @@ rather than a cryptic "command not found."
   proof the *gateway* ended it, not curl giving up. Not part of `make
   ci-interop`/`make ci-docker` — no Docker, no network beyond localhost,
   runs in `make ci`.
+
+- **`run-e2e-hot-reload.sh`** — issue #57's hot-reload for admin-
+  registered nodes: drives the real compiled binary through real
+  `POST`/`DELETE /admin/nodes` calls against the *same still-running*
+  process — no restart anywhere in this script. `run-e2e-nodes.sh`
+  (issue #15) needed real changes alongside this one, not just a new
+  neighbor — its original "not yet reachable before a restart" DoD
+  moment was precisely the behavior this issue makes false, so it now
+  asserts the still-real, still-distinct property this script doesn't
+  cover: a node's registration genuinely *persists* across a real
+  restart, not that one is required. Proves, all without a restart:
+  a real per-node token mints for a node registered seconds earlier;
+  RFC 9728 metadata serves real content for it; a real session
+  establishes and a real `tools/call` succeeds through it; after
+  deleting the node, a brand-new session attempt is rejected and
+  minting/metadata both stop working immediately, while the session
+  that was already open *before* the delete keeps working (story 5) —
+  the one behavior that's easy to get right in isolation and easy to
+  break by over-applying the "gone means gone" instinct everywhere at
+  once. Not part of `make ci-interop`/`make ci-docker` — no Docker, no
+  network beyond localhost, runs in `make ci`.
 
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC

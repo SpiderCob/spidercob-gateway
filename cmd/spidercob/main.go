@@ -106,6 +106,51 @@ func (a adminMCPSessionManager) EndSession(ctx context.Context, id string) error
 	return err
 }
 
+// nodeRegistrarAdapter adapts *proxy.Gateway, *authserver.AuthServer, and
+// *pin.Scheduler together into adminapi.NodeRegistrar (issue #57,
+// hot-reload) -- the one place that needs to know all three concrete
+// components exist and fans a single admin add/remove call out to each.
+// On AddNode: proxy first (routing) -- the only one of the three that
+// can actually fail (validation, or an already-registered name); if it
+// does, authserver/the pin scheduler are never touched, since there's
+// no reason to make a node mintable or start pinning it when it isn't
+// even routable. authserver.AddNode/pin.Scheduler.AddNode are both
+// deliberately void, idempotent operations (a node name either is or
+// isn't present; there's no other state to reject), so once proxy
+// succeeds the rest can't fail either. RemoveNode mirrors this in
+// reverse: all three removals always run regardless of proxy's own
+// result -- removal should get as far as it can rather than leave a
+// node fully live because one step errored.
+type nodeRegistrarAdapter struct {
+	gw   *proxy.Gateway
+	as   *authserver.AuthServer
+	pins *pin.Scheduler
+}
+
+func (a nodeRegistrarAdapter) AddNode(n config.Node) error {
+	if err := a.gw.AddNode(n); err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+	a.as.AddNode(n.Name)
+	// 0 (n.PinRefreshIntervalSeconds unset) means "use the scheduler's
+	// own DefaultInterval" -- pin.Scheduler.AddNode's interval<=0
+	// handling already does exactly that, mirroring how a node named in
+	// config.json falls back the same way at startup.
+	interval := time.Duration(n.PinRefreshIntervalSeconds) * time.Second
+	a.pins.AddNode(n.Name, interval)
+	return nil
+}
+
+func (a nodeRegistrarAdapter) RemoveNode(name string) error {
+	err := a.gw.RemoveNode(name)
+	a.as.RemoveNode(name)
+	a.pins.RemoveNode(name)
+	if err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
+	return nil
+}
+
 // localAdminAuthenticator and localAdminIntrospector adapt
 // *authserver.AuthServer to adminapi.LocalAdminAuthenticator/
 // SpiderSnoopIntrospector for standalone (no spider-snoop) deployments
@@ -338,10 +383,12 @@ func main() {
 	// admin registered via the API instead). The FULL current set (config-
 	// and admin-sourced alike) then replaces cfg.Nodes for every
 	// downstream construction step below, so proxy.New/authserver.New/the
-	// pin scheduler need zero internal changes to pick up admin-registered
-	// nodes -- on the *next* startup. A node created via POST /admin/nodes
-	// while the gateway is already running has no effect on this running
-	// process; there is no hot-reload yet (MASTER_PLAN.md §6, 2026-08-08).
+	// pin scheduler start with a complete picture even before hot-reload's
+	// own live-registration path (issue #57) ever runs -- this bootstrap
+	// loop only covers config.json's nodes on process start; a node
+	// created via POST /admin/nodes while the gateway is already running
+	// is applied live via nodeRegistrarAdapter at the point it's
+	// registered, not through this loop.
 	for _, n := range cfg.Nodes {
 		if _, err := db.UpsertConfigNode(context.Background(), configNodeToStoreNode(n)); err != nil {
 			slog.Error("failed to bootstrap config-defined node into the store", "node", n.Name, "err", err)
@@ -472,13 +519,14 @@ func main() {
 			MaxAge: time.Duration(cfg.AdminUISessionMaxAgeSeconds) * time.Second,
 		})
 		adminAPI, err = adminapi.New(adminapi.Config{
-			Store:        db,
-			Identity:     identitySvc,
-			Authn:        adminAuthValidator{as: as},
-			Introspector: introspector,
-			UISessions:   uiSessions,
-			MCPSessions:  adminMCPSessionManager{gw: gw},
-			LocalAdmin:   localAdmin,
+			Store:         db,
+			Identity:      identitySvc,
+			Authn:         adminAuthValidator{as: as},
+			Introspector:  introspector,
+			UISessions:    uiSessions,
+			MCPSessions:   adminMCPSessionManager{gw: gw},
+			LocalAdmin:    localAdmin,
+			NodeRegistrar: nodeRegistrarAdapter{gw: gw, as: as, pins: pinScheduler},
 		})
 		if err != nil {
 			slog.Error("failed to build adminapi", "err", err)

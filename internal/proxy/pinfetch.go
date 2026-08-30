@@ -22,7 +22,9 @@ import (
 // is the single source of truth for what gets pinned, same as every
 // other per-node feature in this codebase.
 func (g *Gateway) FetchToolsForPin(ctx context.Context, node string) ([]pin.ToolDef, error) {
+	g.nodesMu.RLock()
 	nc, ok := g.nodes[node]
+	g.nodesMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("proxy: unknown node %q", node)
 	}
