@@ -209,6 +209,24 @@ rather than a cryptic "command not found."
   mint working. Not part of `make ci-interop`/`make ci-docker` — no
   Docker, no network beyond localhost, runs in `make ci`.
 
+- **`run-e2e-stream-scan.sh`** — issue #55's windowed streaming (SSE)
+  response scanning: builds the real binary plus a real, separate
+  streamable_http upstream fixture (`internal/proxy/testdata/
+  sseupstream`, not a mock), and drives real curl traffic through the
+  actual compiled gateway against it. Three properties, each needing a
+  real TCP round trip to actually prove, not just in-process reasoning:
+  a secret split across a real chunk boundary is redacted rather than
+  leaked; the response is genuinely delivered incrementally, not
+  buffered-then-sent — proven by a real client's time-to-first-byte
+  landing far below a deliberately long pause between the upstream's two
+  chunks, while total request time reflects the full pause; and a
+  runaway stream (an upstream that would write forever) is cut off at
+  the response size cap with received bytes landing just above the cap
+  and the connection ending well before curl's own much longer timeout —
+  proof the *gateway* ended it, not curl giving up. Not part of `make
+  ci-interop`/`make ci-docker` — no Docker, no network beyond localhost,
+  runs in `make ci`.
+
 - **`run-e2e-idjag.sh`** (`make ci-interop`, separate from `make ci` —
   needs Docker) — issue #5's Keycloak interop: the real 3-legged RFC
   7523/8693 flow against a real Keycloak container, realm/client/user

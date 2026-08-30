@@ -39,3 +39,5 @@ echo
 "$script_dir/run-e2e-release.sh"
 echo
 "$script_dir/run-e2e-connect.sh"
+echo
+"$script_dir/run-e2e-stream-scan.sh"

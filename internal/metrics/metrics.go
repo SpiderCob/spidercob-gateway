@@ -227,4 +227,18 @@ var (
 	// losing data" under sustained load.
 	AuditRecordsDropped = NewCounter("spidercob_audit_records_dropped_total",
 		"Per-MCP-request audit records dropped because the write queue was full.")
+
+	// StreamedResponses counts responses forwarded through the real,
+	// incremental SSE streaming path (issue #55) rather than the
+	// buffered one -- the signal an operator uses to confirm streaming
+	// traffic is actually taking the new path, not silently falling
+	// back to buffering.
+	StreamedResponses = NewCounter("spidercob_streamed_responses_total",
+		"Responses forwarded through the windowed streaming path.", "node")
+
+	// StreamCapExceeded counts streamed responses cut off for exceeding
+	// maxStreamBytes -- distinguishes normal streaming traffic from an
+	// upstream that's actually a problem (issue #55 spec, story 7).
+	StreamCapExceeded = NewCounter("spidercob_stream_cap_exceeded_total",
+		"Streamed responses terminated for exceeding the response size cap.", "node")
 )

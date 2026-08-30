@@ -102,6 +102,14 @@ type Gateway struct {
 	auditQueue      chan audit.Record
 	stopAuditWorker chan struct{}
 	auditWorkerDone chan struct{}
+
+	// maxStreamBytes bounds a single streamed response (issue #55) --
+	// defaults to defaultMaxStreamBytes in New(); overridable only by
+	// this package's own tests, which need a small cap to exercise
+	// truncation without writing megabytes, the same "exported default,
+	// test-only override" shape setAuditRecorder's capacity parameter
+	// already established for audit queue sizing.
+	maxStreamBytes int
 }
 
 // New builds a Gateway. authn validates every request's bearer token
@@ -124,16 +132,17 @@ func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
 		initialPolicy = policy.AllowAll{}
 	}
 	g := &Gateway{
-		nodes:      make(map[string]*nodeConfig),
-		sessions:   newSessionManager(time.Duration(cfg.IdleSessionTimeoutSeconds) * time.Second),
-		policy:     initialPolicy,
-		scanners:   scan.DefaultWithPII(scan.PIIConfig{DetectEmail: cfg.ScanDetectEmail, DetectPhone: cfg.ScanDetectPhone}),
-		client:     &http.Client{Timeout: 30 * time.Second},
-		authn:      authn,
-		issuer:     strings.TrimRight(cfg.Issuer, "/"),
-		nodeHealth: make(map[string]*nodeHealth),
-		stopReaper: make(chan struct{}),
-		reaperDone: make(chan struct{}),
+		nodes:          make(map[string]*nodeConfig),
+		sessions:       newSessionManager(time.Duration(cfg.IdleSessionTimeoutSeconds) * time.Second),
+		policy:         initialPolicy,
+		scanners:       scan.DefaultWithPII(scan.PIIConfig{DetectEmail: cfg.ScanDetectEmail, DetectPhone: cfg.ScanDetectPhone}),
+		client:         &http.Client{Timeout: 30 * time.Second},
+		authn:          authn,
+		issuer:         strings.TrimRight(cfg.Issuer, "/"),
+		nodeHealth:     make(map[string]*nodeHealth),
+		stopReaper:     make(chan struct{}),
+		reaperDone:     make(chan struct{}),
+		maxStreamBytes: defaultMaxStreamBytes,
 	}
 	for _, n := range cfg.Nodes {
 		nc := &nodeConfig{name: n.Name, transport: n.Transport, command: n.Command, args: n.Args}
@@ -222,6 +231,22 @@ type statusRecorder struct {
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush makes *statusRecorder itself satisfy http.Flusher whenever the
+// real underlying ResponseWriter does -- embedding http.ResponseWriter as
+// an interface field only promotes the methods that interface itself
+// declares (Header/Write/WriteHeader), never Flush, so without this a
+// streamed response forwarded through a statusRecorder (every request
+// except a session's very first initialize -- see ServeHTTP's sr vs w
+// split) would silently never flush incrementally, defeating issue #55's
+// entire point on every request after the first one in a session. A safe
+// no-op when the underlying writer doesn't support it (e.g. in tests
+// using a plain httptest.ResponseRecorder without a Flusher).
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ServeHTTP routes /mcp/{node}/... to the registered upstream, through the
@@ -408,7 +433,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.touch()
 	g.enqueueAudit(claims, rpcMethod+":allowed", auditResource(nodeName, toolName))
-	g.forward(sr, r, sess, false, rpcMethod)
+	g.forward(sr, r, sess, false, rpcMethod, toolName)
 }
 
 // authenticate validates the request's bearer token against nodeName. On
@@ -485,7 +510,7 @@ func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *n
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	g.forward(w, r, sess, true, "initialize") // handleNewSession is only ever reached when rpcMethod == "initialize"
+	g.forward(w, r, sess, true, "initialize", "") // handleNewSession is only ever reached when rpcMethod == "initialize"
 }
 
 func (g *Gateway) handleDelete(w http.ResponseWriter, ctx context.Context, nodeName, sessionID string) {
@@ -542,16 +567,64 @@ func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstr
 	return &stdioUpstreamSession{node: node}, nil
 }
 
-// forward dispatches one request through a session's upstream, runs the
-// outbound DLP chain over the buffered response, filters tools/list
-// responses down to only what the caller's policy actually authorizes,
-// and -- for a newly established session -- stamps the gateway-minted
-// session ID onto both the Mcp-Session-Id header and a mirrored cookie
-// before anything is written to the real client.
-func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod string) {
-	buf := newBufferedResponseWriter()
-	sess.upstream.ServeHTTP(buf, r)
+// forward dispatches one request through a session's upstream. Most
+// responses (tools/call, tools/list, initialize against a non-streaming
+// upstream) go through today's fully-buffered path: the whole body is
+// read, DLP-scanned in one pass, and written once. A response the
+// upstream marks Content-Type: text/event-stream instead goes through
+// forwardStreaming (issue #55) -- a real incremental copy-scan-flush
+// loop, only available for upstreams that implement streamingRoundTripper
+// (HTTP-transport nodes; stdio nodes fall back to the buffered path
+// unconditionally, since they have no HTTP-level streaming signal at
+// all). tools/list always takes the buffered path regardless of
+// Content-Type: filterToolsListResponse needs the complete, parsed JSON
+// body to strip unauthorized/quarantined tools out before it ever
+// reaches the client (story 14), and forwardStreaming has no equivalent
+// -- an upstream that happened to answer tools/list via SSE would
+// otherwise stream every tool straight through with only secret/PII
+// redaction applied, silently reopening exactly what that filtering
+// exists to close.
+func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string) {
+	streamer, ok := sess.upstream.(streamingRoundTripper)
+	if !ok {
+		buf := newBufferedResponseWriter()
+		sess.upstream.ServeHTTP(buf, r)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		return
+	}
 
+	resp, err := streamer.roundTrip(r)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if rpcMethod == "tools/list" || !isSSEResponse(resp) {
+		buf := newBufferedResponseWriter()
+		writeUpstreamResponse(buf, resp)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		return
+	}
+
+	g.forwardStreaming(w, r, sess, newSession, rpcMethod, toolName, resp)
+}
+
+// finishBufferedForward is today's original forward() body -- DLP-scan
+// the whole buffered response, filter tools/list, stamp session headers,
+// write once. Both of forward()'s non-streaming branches funnel into
+// this so buffered behavior stays byte-for-byte identical to before
+// issue #55, regardless of which one produced buf, with one addition:
+// tools/list is now *always* routed here regardless of the upstream's
+// Content-Type (forward()'s doc comment explains why), so a tools/list
+// response an upstream chose to answer via SSE anyway (legal under the
+// MCP streamable_http transport) still needs its JSON-RPC payload pulled
+// out of that framing before filterToolsListResponse can do anything
+// with it -- otherwise filtering would silently no-op against
+// unparseable "data: {...}" bytes and the unfiltered tool list would
+// reach the client after all, just through a different door than the
+// one already closed.
+func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod string, buf *bufferedResponseWriter) {
 	clean, verdicts := g.scanners.ScanResponse(buf.body.Bytes())
 	for _, v := range verdicts {
 		metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "response", sess.node)
@@ -566,9 +639,23 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	// restricts the *contents* of that permitted response to only the
 	// tools the caller is separately authorized to invoke via tools/call
 	// (story 14: unauthorized tools become invisible, not just blocked).
+	sseWrapped := isSSEContentType(buf.header.Get("Content-Type"))
 	if rpcMethod == "tools/list" {
 		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
-			clean = g.filterToolsListResponse(r.Context(), claims.Subject, sess.node, clean)
+			listBody := clean
+			if sseWrapped {
+				listBody = sseEventData(listBody)
+			}
+			clean = g.filterToolsListResponse(r.Context(), claims.Subject, sess.node, listBody)
+			if sseWrapped {
+				// Normalized to plain JSON: tools/list is a synchronous,
+				// non-streaming-by-nature method, so there's no reason
+				// to round-trip back through SSE framing just because
+				// the upstream happened to choose it -- simpler for the
+				// client, and sidesteps re-encoding a second event
+				// correctly.
+				buf.header.Set("Content-Type", "application/json")
+			}
 		}
 	}
 
@@ -587,6 +674,159 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	w.Header().Set("Content-Length", fmt.Sprint(len(clean)))
 	w.WriteHeader(buf.status)
 	_, _ = w.Write(clean)
+}
+
+// isSSEResponse is the streaming-detection trigger (issue #55 spec): an
+// upstream response is treated as a real stream only when it says so
+// itself via Content-Type. Everything else -- the large majority of
+// traffic -- takes the buffered path unchanged.
+func isSSEResponse(resp *http.Response) bool {
+	return isSSEContentType(resp.Header.Get("Content-Type"))
+}
+
+func isSSEContentType(ct string) bool {
+	return strings.HasPrefix(strings.TrimSpace(ct), "text/event-stream")
+}
+
+// sseEventData extracts the JSON-RPC payload from a body the gateway
+// buffered from an upstream that answered a synchronous,
+// non-streaming-by-nature request (tools/list) via SSE framing anyway --
+// legal under the MCP streamable_http transport, but not something
+// filterToolsListResponse's plain json.Unmarshal can parse as-is. MCP's
+// SSE encoding for a single request/response pair is one event: one or
+// more "data:" lines, joined per the SSE spec (strip the "data:" prefix
+// and at most one following space, join what's left with "\n"),
+// terminated by a blank line -- exactly what this reconstructs. If body
+// contains no "data:" line at all, it's returned unchanged: either it
+// was never SSE-framed, or there's nothing to extract either way.
+func sseEventData(body []byte) []byte {
+	if !bytes.Contains(body, []byte("data:")) {
+		return body
+	}
+	var lines []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimRight(line, "\r")
+		rest, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		lines = append(lines, strings.TrimPrefix(rest, " "))
+	}
+	if len(lines) == 0 {
+		return body
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// defaultMaxStreamBytes bounds how much of a single streamed response the
+// gateway will hold in flight, mirroring maxBodyBytes' existing
+// request-side precedent -- closing the response side's equivalent gap
+// (issue #55 spec). A stream that exceeds it is terminated, not silently
+// truncated-and-called-success: see forwardStreaming's truncated handling.
+const defaultMaxStreamBytes = 10 << 20 // 10 MiB
+
+// streamCopyChunkSize is how much is read from the upstream body per
+// Read call -- small enough that redacted content still reaches the
+// client promptly, large enough not to make regex matching per chunk
+// needlessly granular.
+const streamCopyChunkSize = 32 * 1024
+
+// forwardStreaming relays resp's body to the client incrementally,
+// scanning through a windowed ResponseWindow so a secret/PII match
+// spanning a chunk boundary is still caught before anything unsafe is
+// released (issue #55). If no configured scanner implements
+// StreamScanner, it falls back to the safe pre-existing default --
+// buffer the whole thing and scan it in one pass -- rather than ever
+// forwarding streamed bytes with no scanning applied at all.
+func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, resp *http.Response) {
+	window, ok := g.scanners.NewResponseWindow()
+	if !ok {
+		buf := newBufferedResponseWriter()
+		writeUpstreamResponse(buf, resp)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		return
+	}
+
+	for k, vv := range resp.Header {
+		if strings.EqualFold(k, "Mcp-Session-Id") || strings.EqualFold(k, "Content-Length") {
+			// Mcp-Session-Id: never leak the upstream's own session id to
+			// the client, same as the buffered path. Content-Length:
+			// redaction can change the total byte count, and this
+			// response is chunked-transfer-encoded, not length-declared --
+			// carrying the upstream's original value through would be
+			// actively wrong.
+			continue
+		}
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	if newSession {
+		w.Header().Set("Mcp-Session-Id", sess.id)
+		http.SetCookie(w, &http.Cookie{
+			Name: sessionCookieName, Value: sess.id,
+			Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		})
+	}
+	w.WriteHeader(resp.StatusCode)
+	flusher, canFlush := w.(http.Flusher)
+	if canFlush {
+		flusher.Flush()
+	}
+
+	metrics.StreamedResponses.Inc(sess.node)
+
+	writeAndFlush := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		_, _ = w.Write(b)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	var allVerdicts []scan.Verdict
+	var total int
+	truncated := false
+	buf := make([]byte, streamCopyChunkSize)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			total += n
+			if total > g.maxStreamBytes {
+				truncated = true
+				metrics.StreamCapExceeded.Inc(sess.node)
+				slog.Warn("streamed response exceeded size cap, terminating",
+					"node", sess.node, "cap_bytes", g.maxStreamBytes)
+				break
+			}
+			flushed, verdicts := window.Feed(buf[:n])
+			allVerdicts = append(allVerdicts, verdicts...)
+			writeAndFlush(flushed)
+		}
+		if readErr != nil {
+			break // EOF (normal end of stream) or a real read error -- either way, nothing more is coming.
+		}
+	}
+	if !truncated {
+		flushed, verdicts := window.Flush()
+		allVerdicts = append(allVerdicts, verdicts...)
+		writeAndFlush(flushed)
+	}
+
+	for _, v := range allVerdicts {
+		metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "response", sess.node)
+		slog.Warn("scan verdict",
+			"scanner", v.Scanner, "action", v.Action.String(),
+			"direction", "response", "node", sess.node, "detail", v.Detail)
+	}
+
+	if truncated {
+		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
+			g.enqueueAudit(claims, rpcMethod+":stream_truncated", auditResource(sess.node, toolName))
+		}
+	}
 }
 
 // bufferedResponseWriter buffers a response in memory so it can be
@@ -619,14 +859,33 @@ type httpUpstreamSession struct {
 	upstreamSessionID string
 }
 
-func (u *httpUpstreamSession) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// streamingRoundTripper is an optional capability a sessionUpstream may
+// implement: a real round trip to the upstream, returning its response
+// headers before the body is consumed, so forward() can inspect
+// Content-Type and pick a buffered or windowed-streaming copy strategy
+// before committing to either (issue #55). Only httpUpstreamSession
+// implements this -- stdio nodes have no HTTP-level streaming signal to
+// detect. A sessionUpstream that doesn't implement it makes forward()
+// fall back to today's ServeHTTP(buf, r) full-buffer path unchanged,
+// the same "optional interface, absence means fall back to existing
+// behavior" pattern this package already uses for SetPolicy/
+// SetPinRegistry/SetAuditRecorder.
+type streamingRoundTripper interface {
+	roundTrip(r *http.Request) (*http.Response, error)
+}
+
+// roundTrip builds the outbound request (upstream session-ID
+// substitution, header hygiene) and performs it, returning the real
+// *http.Response with its body not yet consumed -- shared by both
+// ServeHTTP (which then copies the body itself) and forward()'s
+// streaming-capable path (which inspects headers first).
+func (u *httpUpstreamSession) roundTrip(r *http.Request) (*http.Response, error) {
 	outURL := *u.upstreamURL
 	outURL.Path = singleJoiningSlash(u.upstreamURL.Path, r.URL.Path)
 
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), r.Body)
 	if err != nil {
-		writeUpstreamError(w, err)
-		return
+		return nil, err
 	}
 	outReq.Header = r.Header.Clone()
 	outReq.Header.Del("Accept-Encoding") // keep responses uncompressed so they stay scannable
@@ -643,20 +902,25 @@ func (u *httpUpstreamSession) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := u.client.Do(outReq)
 	if err != nil {
-		writeUpstreamError(w, err)
-		return
+		return nil, err
 	}
-	defer resp.Body.Close()
 
 	if upstreamID := resp.Header.Get("Mcp-Session-Id"); upstreamID != "" {
 		u.mu.Lock()
 		u.upstreamSessionID = upstreamID
 		u.mu.Unlock()
 	}
+	return resp, nil
+}
 
+// writeUpstreamResponse copies resp's headers (minus Mcp-Session-Id,
+// never leaked to the client), status, and full body into w -- the
+// shared tail end of both ServeHTTP and forward()'s non-streaming,
+// already-round-tripped path.
+func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response) {
 	for k, vv := range resp.Header {
 		if strings.EqualFold(k, "Mcp-Session-Id") {
-			continue // never leak the upstream's own session id to the client
+			continue
 		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
@@ -664,6 +928,16 @@ func (u *httpUpstreamSession) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (u *httpUpstreamSession) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	resp, err := u.roundTrip(r)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	writeUpstreamResponse(w, resp)
 }
 
 func (u *httpUpstreamSession) teardown(ctx context.Context) error {

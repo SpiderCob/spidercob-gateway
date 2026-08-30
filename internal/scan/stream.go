@@ -4,9 +4,19 @@ package scan
 // incremental scanning of streamed (SSE) responses, in addition to the
 // buffered ScanResponse every Scanner already provides. A scanner that
 // doesn't implement this is skipped on streaming responses -- Phase 1's
-// existing behavior -- until a real implementation lands in Phase 3
-// (design doc §6: "streaming responses scanned in windowed chunks with
-// redaction applied before flush").
+// original behavior when this interface was only groundwork, still the
+// per-scanner fallback today (design doc §6: "streaming responses
+// scanned in windowed chunks with redaction applied before flush").
+//
+// SecretScanner and PIIScanner implement this (issue #55, window.go) --
+// the two scanners that already redact unconditionally in the buffered
+// chain. EntropyScanner/InjectionScanner (flag-only) still don't; a
+// streamed response gets secret/PII redaction but not entropy/injection
+// flagging until a follow-up closes that gap. internal/proxy's
+// forwardStreaming is the real consumer: it composes a Chain's
+// implementing scanners into one window (Chain.NewResponseWindow) and
+// relays an SSE response through it incrementally, falling back to the
+// buffered path entirely if no scanner in the chain implements this.
 type StreamScanner interface {
 	Scanner
 	// NewResponseWindow returns a fresh, stateful window for one streaming

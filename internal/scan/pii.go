@@ -167,3 +167,28 @@ func (s *PIIScanner) ScanResponse(body []byte) ([]byte, Verdict) {
 
 	return body, v
 }
+
+// NewResponseWindow implements StreamScanner (issue #55): windowed,
+// boundary-safe SSN and credit-card redaction for streamed (SSE)
+// responses, using the exact same plausibility (SSN) and Luhn (credit
+// card) filters ScanResponse above already applies. Email/phone
+// detection is buffered-response-only -- flag-only signals aren't part
+// of the redaction guarantee streaming needs to preserve, and windowing
+// them is deferred (issue #55 spec's Out of Scope).
+func (s *PIIScanner) NewResponseWindow() ResponseWindow {
+	rules := []patternRule{
+		{
+			name:      "ssn",
+			re:        ssnPattern,
+			accept:    func(m []byte) bool { return ssnPlausible(string(m)) },
+			redaction: ssnRedaction,
+		},
+		{
+			name:      "credit-card",
+			re:        creditCardPattern,
+			accept:    func(m []byte) bool { return luhnValid(digitsOnly(string(m))) },
+			redaction: creditCardRedaction,
+		},
+	}
+	return &windowedRedactor{scanner: s.Name(), margin: defaultWindowMargin, rules: rules}
+}

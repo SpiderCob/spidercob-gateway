@@ -3,6 +3,7 @@ package scan
 import (
 	"fmt"
 	"regexp"
+	"sort"
 )
 
 // Seed rules. Secret patterns derived from the Gitleaks ruleset (MIT);
@@ -52,6 +53,18 @@ func (s *SecretScanner) ScanResponse(body []byte) ([]byte, Verdict) {
 		}
 	}
 	return body, v
+}
+
+// NewResponseWindow implements StreamScanner (issue #55): windowed,
+// boundary-safe secret redaction for streamed (SSE) responses, using the
+// exact same pattern set as ScanResponse above.
+func (s *SecretScanner) NewResponseWindow() ResponseWindow {
+	rules := make([]patternRule, 0, len(secretPatterns))
+	for name, re := range secretPatterns {
+		rules = append(rules, patternRule{name: name, re: re})
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].name < rules[j].name })
+	return &windowedRedactor{scanner: s.Name(), margin: defaultWindowMargin, rules: rules}
 }
 
 var injectionPatterns = []*regexp.Regexp{
