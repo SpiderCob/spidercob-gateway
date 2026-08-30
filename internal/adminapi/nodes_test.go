@@ -156,6 +156,41 @@ func TestDeleteNode_ConfigSourced_NeverReachesRegistrar(t *testing.T) {
 	}
 }
 
+// TestCreateNode_RejectsReservedSpidercobAdminName is the regression
+// proof for a real review finding on issue #59: without this check, the
+// store write would still succeed (spidercob-admin is never a store row
+// on its own, only a live in-process g.nodes entry, so there's no
+// unique-constraint conflict to catch it) even though live-apply would
+// correctly fail -- and a subsequent DELETE of that now-admin-sourced
+// row would pass deleteNode's Source==NodeSourceConfig-only guard and
+// reach NodeRegistrar.RemoveNode, which (absent proxy.Gateway's own
+// defense-in-depth refusal, internal/proxy/node_registry.go) would tear
+// down the live spidercob-admin routing entry: an ordinary node-admin
+// caller DoS-ing the gateway's own admin MCP surface via two otherwise-
+// permitted REST calls, no restart-required. This test proves the fix
+// closes it at the source -- rejected before any store write happens at
+// all, not just eventually undone.
+func TestCreateNode_RejectsReservedSpidercobAdminName(t *testing.T) {
+	reg := &fakeNodeRegistrar{}
+	api, s := newTestAdminAPIWithNodeRegistrar(t, reg)
+
+	body, _ := json.Marshal(createNodeRequest{Name: "spidercob-admin", Transport: "streamable_http", UpstreamURL: "http://localhost:3001"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/nodes", body)
+	if rec.Code != 409 {
+		t.Fatalf("status = %d, want 409, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := s.GetNodeByName(t.Context(), "spidercob-admin"); err == nil {
+		t.Fatal("expected no store row to be created for the reserved name -- the check must run before any store write")
+	}
+
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if len(reg.added) != 0 {
+		t.Fatalf("expected zero NodeRegistrar.AddNode calls for a rejected reserved-name request, got %+v", reg.added)
+	}
+}
+
 func TestCreateNode_NoRegistrar_UnaffectedByIssue57(t *testing.T) {
 	// A nil NodeRegistrar (the plain newTestAdminAPI helper every
 	// pre-existing node test already uses) must behave exactly as

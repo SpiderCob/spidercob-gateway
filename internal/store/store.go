@@ -289,6 +289,21 @@ type Store interface {
 	// quarantine set once per tools/list filter call rather than querying
 	// per tool name.
 	ToolPinsForNode(ctx context.Context, node string) ([]ToolPin, error)
+	// ListQuarantinedToolPins returns every pin, across every node, whose
+	// QuarantinedAt is non-nil (issue #59: spidercob-admin's
+	// list_quarantined_tools) -- ToolPinsForNode's own node-scoped
+	// cousin, for the "what's quarantined anywhere" view an admin needs
+	// without already knowing which node to look at.
+	ListQuarantinedToolPins(ctx context.Context) ([]ToolPin, error)
+	// ApproveToolPin re-pins an existing (node, tool_name) row to a
+	// freshly-observed hash/inputSchema and clears its quarantine
+	// (QuarantinedAt/DriftDetail both reset to nil) in one write (issue
+	// #59: spidercob-admin's approve_tool) -- a deliberate, one-time TOFU
+	// reset for that one tool, not a blanket trust-everything toggle.
+	// Returns ErrNotFound if no pin exists for (node, tool_name) at all
+	// (the caller must have a real pin to approve; there's nothing to
+	// approve for a tool that was never observed in the first place).
+	ApproveToolPin(ctx context.Context, node, toolName, newHash, newInputSchema string) error
 
 	// CreateNode registers a new node. Returns ErrConflict if a node with
 	// this name already exists, regardless of source.

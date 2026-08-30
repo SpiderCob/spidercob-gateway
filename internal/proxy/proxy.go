@@ -47,6 +47,16 @@ type nodeConfig struct {
 	upstreamURL *url.URL
 	command     string
 	args        []string
+
+	// inProcessHandler, when non-nil, makes this node an in-process one
+	// (issue #59: spidercob-admin) -- routed via inProcessUpstreamSession
+	// instead of the ordinary stdio/streamable_http dispatch, regardless
+	// of transport (which stays empty/unused for this kind of node).
+	// There is no config.Node shape that can set this field -- it's only
+	// ever populated by Gateway.registerInProcessNode, called directly by
+	// the composition root, deliberately unreachable through the admin
+	// API's node-registration path.
+	inProcessHandler http.Handler
 }
 
 // AuthClaims is the subset of a validated access token's claims the proxy
@@ -565,6 +575,9 @@ func (g *Gateway) healthFor(node string) *nodeHealth {
 }
 
 func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstream, error) {
+	if nc.inProcessHandler != nil {
+		return &inProcessUpstreamSession{handler: nc.inProcessHandler}, nil
+	}
 	if nc.transport != config.TransportStdio {
 		return &httpUpstreamSession{client: g.client, upstreamURL: nc.upstreamURL}, nil
 	}

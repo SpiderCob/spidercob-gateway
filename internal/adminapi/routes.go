@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumeetgp/spidercob-gateway/internal/adminmcp"
 	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/identity"
@@ -685,10 +686,28 @@ type createNodeRequest struct {
 // write already takes. A nil NodeRegistrar (not wired in this
 // deployment/test) skips live-apply entirely -- exactly today's
 // restart-required behavior, not a silently-failing one.
+//
+// Rejects the reserved spidercob-admin name outright, before any store
+// write (issue #59 review finding, security-critical): without this,
+// the store write here would still succeed (spidercob-admin is never a
+// store row, only a live in-process g.nodes entry, so there's no unique-
+// constraint conflict) even though live-apply would correctly fail --
+// and a subsequent DELETE of that now-admin-sourced row would pass
+// deleteNode's Source==NodeSourceConfig-only guard and reach
+// NodeRegistrar.RemoveNode, which (absent proxy.Gateway's own defense-
+// in-depth check) would tear down the live spidercob-admin routing
+// entry: an ordinary node-admin caller DoS-ing the gateway's own admin
+// MCP surface via two permitted REST calls, no restart-required. This
+// check closes it at the source; proxy.Gateway.RemoveNode's own refusal
+// (issue #59, node_registry.go) is the second, independent layer.
 func (a *AdminAPI) createNode(w http.ResponseWriter, r *http.Request) {
 	var req createNodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == adminmcp.ServerName {
+		writeAdminError(w, http.StatusConflict, "this node name is reserved")
 		return
 	}
 

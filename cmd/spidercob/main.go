@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sumeetgp/spidercob-gateway/internal/adminapi"
+	"github.com/sumeetgp/spidercob-gateway/internal/adminmcp"
 	"github.com/sumeetgp/spidercob-gateway/internal/audit"
 	"github.com/sumeetgp/spidercob-gateway/internal/authserver"
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
@@ -104,6 +105,20 @@ func (a adminMCPSessionManager) EndSession(ctx context.Context, id string) error
 		return adminapi.ErrSessionNotFound
 	}
 	return err
+}
+
+// adminMCPKiller adapts *proxy.Gateway to adminmcp.SessionKiller (issue
+// #59's kill_session tool) -- a second, independently-defined adapter
+// over the same underlying Gateway.EndSession method
+// adminMCPSessionManager already wraps, following this file's own
+// established precedent (authValidator/adminAuthValidator are the same
+// two-adapters-one-concrete-type shape) rather than having
+// internal/adminmcp import internal/adminapi just to reuse its error
+// type.
+type adminMCPKiller struct{ gw *proxy.Gateway }
+
+func (a adminMCPKiller) EndSession(ctx context.Context, id string) error {
+	return a.gw.EndSession(ctx, id)
 }
 
 // nodeRegistrarAdapter adapts *proxy.Gateway, *authserver.AuthServer, and
@@ -471,6 +486,30 @@ func main() {
 	// DevAllowAllPolicy/pinning -- unlike those, auditing has no reason
 	// to ever be conditionally disabled once a store exists to back it.
 	gw.SetAuditRecorder(auditRecorderAdapter{store: db})
+
+	// spidercob-admin (issue #59, design doc §9.1): the gateway as its
+	// own MCP server, reached in-process (internal/proxy's
+	// RegisterInProcessNode) through the exact same policy/scan/audit
+	// pipeline every other node already goes through. Reserved and
+	// always registered -- reachability is governed entirely by ordinary
+	// policy (default-deny until an operator grants a group access to
+	// it), the same "no separate on/off switch" posture every other
+	// node's reachability already has. Deliberately NOT added to
+	// pinScheduler below: its tools are defined in Go code, not fetched
+	// from an external upstream, so "drift" for this node would only
+	// ever mean a gateway binary upgrade changed a tool's schema, not a
+	// rug-pull -- pinning it would incorrectly quarantine legitimate
+	// admin tools after every such upgrade.
+	adminMCP, err := adminmcp.New(adminmcp.Config{
+		Store: db, Pins: pinRegistry, Fetch: gw.FetchToolsForPin, Sessions: adminMCPKiller{gw: gw},
+	})
+	if err != nil {
+		slog.Error("failed to build spidercob-admin", "err", err)
+		os.Exit(1)
+	}
+	gw.RegisterInProcessNode(adminmcp.ServerName, adminMCP.Handler())
+	as.AddNode(adminmcp.ServerName)
+	slog.Info("spidercob-admin registered", "node", adminmcp.ServerName)
 
 	pinIntervals := make(map[string]time.Duration, len(cfg.Nodes))
 	for _, n := range cfg.Nodes {

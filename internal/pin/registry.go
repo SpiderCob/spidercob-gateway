@@ -64,6 +64,26 @@ func (r *Registry) Observe(ctx context.Context, node string, tools []ToolDef) er
 	return nil
 }
 
+// Approve re-pins node's tool current to its freshly-observed definition
+// and clears its quarantine (issue #59: spidercob-admin's approve_tool)
+// -- a deliberate, one-time TOFU reset for that one tool, the only way a
+// quarantine ever clears (Observe itself never re-approves anything, see
+// its own doc comment). current must be the tool's *live*, just-fetched
+// definition, not the stale one that triggered the quarantine -- the
+// caller (internal/adminmcp) is responsible for fetching it fresh via
+// the same Fetcher the background scheduler already uses, before calling
+// this. Returns whatever error the underlying store call does, including
+// store.ErrNotFound if no pin exists for this tool at all -- there's
+// nothing to approve for a tool that was never observed in the first
+// place.
+func (r *Registry) Approve(ctx context.Context, node string, current ToolDef) error {
+	newHash, err := Hash(current)
+	if err != nil {
+		return fmt.Errorf("pin: hash %s/%s: %w", node, current.Name, err)
+	}
+	return r.store.ApproveToolPin(ctx, node, current.Name, newHash, string(current.InputSchema))
+}
+
 // NonQuarantined filters toolNames down to those with no quarantined pin
 // for node. Deliberately mirrors policy.Evaluator.FilterTools' shape so
 // the two compose directly at the tools/list filtering seam (story 9).
