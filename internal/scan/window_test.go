@@ -12,8 +12,8 @@ import (
 // fixture, don't look for a suppression flag). The *values* are
 // identical either way; only the source-text shape changes.
 var (
-	fakeAWSKeyHead = "AKIA" + "ABCDE"    // 9 chars
-	fakeAWSKeyTail = "FGHIJKLMNOP"       // 11 chars
+	fakeAWSKeyHead = "AKIA" + "ABCDE" // 9 chars
+	fakeAWSKeyTail = "FGHIJKLMNOP"    // 11 chars
 	fakeAWSKey     = fakeAWSKeyHead + fakeAWSKeyTail
 
 	fakeVisaHead = "4" + "111111" + "1" // 8 digits
