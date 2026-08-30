@@ -576,7 +576,14 @@ func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstr
 // loop, only available for upstreams that implement streamingRoundTripper
 // (HTTP-transport nodes; stdio nodes fall back to the buffered path
 // unconditionally, since they have no HTTP-level streaming signal at
-// all).
+// all). tools/list always takes the buffered path regardless of
+// Content-Type: filterToolsListResponse needs the complete, parsed JSON
+// body to strip unauthorized/quarantined tools out before it ever
+// reaches the client (story 14), and forwardStreaming has no equivalent
+// -- an upstream that happened to answer tools/list via SSE would
+// otherwise stream every tool straight through with only secret/PII
+// redaction applied, silently reopening exactly what that filtering
+// exists to close.
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string) {
 	streamer, ok := sess.upstream.(streamingRoundTripper)
 	if !ok {
@@ -593,7 +600,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	}
 	defer resp.Body.Close()
 
-	if !isSSEResponse(resp) {
+	if rpcMethod == "tools/list" || !isSSEResponse(resp) {
 		buf := newBufferedResponseWriter()
 		writeUpstreamResponse(buf, resp)
 		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
@@ -603,11 +610,20 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	g.forwardStreaming(w, r, sess, newSession, rpcMethod, toolName, resp)
 }
 
-// finishBufferedForward is today's original forward() body, unchanged --
-// DLP-scan the whole buffered response, filter tools/list, stamp session
-// headers, write once. Both of forward()'s non-streaming branches funnel
-// into this so buffered behavior stays byte-for-byte identical to before
-// issue #55, regardless of which one produced buf.
+// finishBufferedForward is today's original forward() body -- DLP-scan
+// the whole buffered response, filter tools/list, stamp session headers,
+// write once. Both of forward()'s non-streaming branches funnel into
+// this so buffered behavior stays byte-for-byte identical to before
+// issue #55, regardless of which one produced buf, with one addition:
+// tools/list is now *always* routed here regardless of the upstream's
+// Content-Type (forward()'s doc comment explains why), so a tools/list
+// response an upstream chose to answer via SSE anyway (legal under the
+// MCP streamable_http transport) still needs its JSON-RPC payload pulled
+// out of that framing before filterToolsListResponse can do anything
+// with it -- otherwise filtering would silently no-op against
+// unparseable "data: {...}" bytes and the unfiltered tool list would
+// reach the client after all, just through a different door than the
+// one already closed.
 func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod string, buf *bufferedResponseWriter) {
 	clean, verdicts := g.scanners.ScanResponse(buf.body.Bytes())
 	for _, v := range verdicts {
@@ -623,9 +639,23 @@ func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, 
 	// restricts the *contents* of that permitted response to only the
 	// tools the caller is separately authorized to invoke via tools/call
 	// (story 14: unauthorized tools become invisible, not just blocked).
+	sseWrapped := isSSEContentType(buf.header.Get("Content-Type"))
 	if rpcMethod == "tools/list" {
 		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
-			clean = g.filterToolsListResponse(r.Context(), claims.Subject, sess.node, clean)
+			listBody := clean
+			if sseWrapped {
+				listBody = sseEventData(listBody)
+			}
+			clean = g.filterToolsListResponse(r.Context(), claims.Subject, sess.node, listBody)
+			if sseWrapped {
+				// Normalized to plain JSON: tools/list is a synchronous,
+				// non-streaming-by-nature method, so there's no reason
+				// to round-trip back through SSE framing just because
+				// the upstream happened to choose it -- simpler for the
+				// client, and sidesteps re-encoding a second event
+				// correctly.
+				buf.header.Set("Content-Type", "application/json")
+			}
 		}
 	}
 
@@ -651,8 +681,41 @@ func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, 
 // itself via Content-Type. Everything else -- the large majority of
 // traffic -- takes the buffered path unchanged.
 func isSSEResponse(resp *http.Response) bool {
-	ct := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	return strings.HasPrefix(ct, "text/event-stream")
+	return isSSEContentType(resp.Header.Get("Content-Type"))
+}
+
+func isSSEContentType(ct string) bool {
+	return strings.HasPrefix(strings.TrimSpace(ct), "text/event-stream")
+}
+
+// sseEventData extracts the JSON-RPC payload from a body the gateway
+// buffered from an upstream that answered a synchronous,
+// non-streaming-by-nature request (tools/list) via SSE framing anyway --
+// legal under the MCP streamable_http transport, but not something
+// filterToolsListResponse's plain json.Unmarshal can parse as-is. MCP's
+// SSE encoding for a single request/response pair is one event: one or
+// more "data:" lines, joined per the SSE spec (strip the "data:" prefix
+// and at most one following space, join what's left with "\n"),
+// terminated by a blank line -- exactly what this reconstructs. If body
+// contains no "data:" line at all, it's returned unchanged: either it
+// was never SSE-framed, or there's nothing to extract either way.
+func sseEventData(body []byte) []byte {
+	if !bytes.Contains(body, []byte("data:")) {
+		return body
+	}
+	var lines []string
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimRight(line, "\r")
+		rest, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue
+		}
+		lines = append(lines, strings.TrimPrefix(rest, " "))
+	}
+	if len(lines) == 0 {
+		return body
+	}
+	return []byte(strings.Join(lines, "\n"))
 }
 
 // defaultMaxStreamBytes bounds how much of a single streamed response the

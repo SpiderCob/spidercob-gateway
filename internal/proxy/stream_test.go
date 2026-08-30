@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/sumeetgp/spidercob-gateway/internal/config"
 	"github.com/sumeetgp/spidercob-gateway/internal/metrics"
 	"github.com/sumeetgp/spidercob-gateway/internal/policy"
+	"github.com/sumeetgp/spidercob-gateway/internal/store"
 )
 
 // fakeAWSKeyHead/fakeAWSKeyTail are a fake AWS-access-key-shaped test
@@ -316,5 +318,177 @@ func TestGateway_StdioNodeHasNoStreamingCapability(t *testing.T) {
 	}
 	if metrics.StreamedResponses.Value("echo") != 0 {
 		t.Error("a stdio node's response must never be counted as streamed")
+	}
+}
+
+// newSSEToolsListUpstreamServer is a real, minimal streamable_http
+// MCP-shaped test upstream that answers tools/list with a legal-but-
+// unusual response shape: the JSON-RPC result wrapped in a real SSE
+// "data:" event, split across two lines, exactly as the MCP streamable_http
+// transport spec permits for any request/response pair, not just
+// long-running ones. initialize responds as plain JSON, same as
+// fakeUpstreamServer.
+func newSSEToolsListUpstreamServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+
+		if req.Method == "initialize" {
+			w.Header().Set("Mcp-Session-Id", "sse-toolslist-upstream-session")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"protocolVersion": "2025-11-25"},
+			})
+			return
+		}
+
+		if req.Method != "tools/list" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+			return
+		}
+
+		resultJSON, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"tools": []map[string]any{
+					{"name": "search_issues", "description": "search"},
+					{"name": "delete_issue", "description": "delete"},
+					{"name": "create_issue", "description": "create"},
+				},
+			},
+		})
+		// One "data:" line carrying the whole JSON-RPC message -- the
+		// shape any real streamable_http server implementation actually
+		// sends for a single, synchronous request/response pair.
+		// sseEventData's multi-line-join rule (used when a server splits
+		// one event's data across several "data:" lines) has its own
+		// dedicated unit test at a syntactically safe split point --
+		// this fixture doesn't need to exercise that path too.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: " + string(resultJSON) + "\n\n"))
+	}))
+}
+
+func TestGateway_SSEToolsListResponse_StillFiltersUnauthorizedTools(t *testing.T) {
+	// Regression for a real finding from this issue's own review: an
+	// upstream that answers tools/list via SSE (legal under the MCP
+	// streamable_http transport) must not bypass policy-based tool
+	// filtering just because of that transport choice -- neither by
+	// taking the streaming path (forwardStreaming has no filtering at
+	// all) nor by reaching filterToolsListResponse with unparseable
+	// SSE-framed bytes it would silently pass through unfiltered.
+	upstream := newSSEToolsListUpstreamServer(t)
+	t.Cleanup(func() { upstream.Close() })
+	env := newPolicyTestEnv(t, upstream.URL, "jira-sse")
+
+	token, agentID := env.createAgentAndMintToken(t, "jira-sse")
+	g, err := env.store.CreateGroup(context.Background(), "engineering-sse")
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := env.store.AssignAgentGroup(context.Background(), agentID, g.ID); err != nil {
+		t.Fatalf("AssignAgentGroup: %v", err)
+	}
+	if err := env.store.ReplacePolicies(context.Background(), []store.NewPolicy{
+		{GroupID: g.ID, Node: "jira-sse", RuleType: store.PolicyAllow, Methods: []string{"initialize", "tools/list", "tools/call"}, Tools: []string{"search_issues", "create_issue"}},
+	}); err != nil {
+		t.Fatalf("ReplacePolicies: %v", err)
+	}
+
+	sessionID := initializeWithToken(t, env.gw, "jira-sse", token)
+	rec := doWithSessionAndToken(env.gw, "jira-sse", sessionID, token,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "delete_issue") {
+		t.Fatalf("delete_issue must be invisible (unauthorized), even from an SSE-wrapped upstream response: %s", body)
+	}
+	if !strings.Contains(body, "search_issues") || !strings.Contains(body, "create_issue") {
+		t.Fatalf("expected the two authorized tools still present: %s", body)
+	}
+	if strings.Contains(body, "data:") {
+		t.Fatalf("expected SSE framing stripped from the normalized JSON response, got %s", body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (normalized away from the upstream's SSE framing)", ct)
+	}
+}
+
+func TestGateway_ToolsListNeverTakesStreamingPath(t *testing.T) {
+	// Even when an upstream answers tools/list via SSE, forward() must
+	// route it to the buffered path -- forwardStreaming has no tool-
+	// filtering step at all, so it must never be reached for this
+	// method (issue #55 review finding).
+	upstream := newSSEToolsListUpstreamServer(t)
+	t.Cleanup(func() { upstream.Close() })
+	env := newPolicyTestEnv(t, upstream.URL, "jira-sse-2")
+	env.gw.policy = policy.AllowAll{}
+
+	token, _ := env.createAgentAndMintToken(t, "jira-sse-2")
+	sessionID := initializeWithToken(t, env.gw, "jira-sse-2", token)
+	rec := doWithSessionAndToken(env.gw, "jira-sse-2", sessionID, token,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+	if metrics.StreamedResponses.Value("jira-sse-2") != 0 {
+		t.Error("tools/list must never be counted as streamed, regardless of the upstream's Content-Type")
+	}
+}
+
+func TestSSEEventData(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "single data line, with the SSE-conventional space after the colon",
+			body: `data: {"a":1}` + "\n\n",
+			want: `{"a":1}`,
+		},
+		{
+			name: "single data line, no space (also legal SSE)",
+			body: `data:{"a":1}` + "\n\n",
+			want: `{"a":1}`,
+		},
+		{
+			// Split at a syntactically safe boundary (right after the
+			// comma) -- exactly the shape a real server splitting one
+			// event across multiple lines would produce; the joined
+			// result must still be valid JSON.
+			name: "split across two data lines at a safe boundary, joined with a newline",
+			body: `data: {"a":1,` + "\n" + `data: "b":2}` + "\n\n",
+			want: `{"a":1,` + "\n" + `"b":2}`,
+		},
+		{
+			name: "not SSE-framed at all -- returned unchanged",
+			body: `{"a":1}`,
+			want: `{"a":1}`,
+		},
+		{
+			name: "CRLF line endings",
+			body: "data: {\"a\":1}\r\n\r\n",
+			want: `{"a":1}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(sseEventData([]byte(tc.body)))
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
