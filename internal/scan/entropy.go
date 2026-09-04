@@ -70,15 +70,32 @@ func (s *EntropyScanner) ScanRequest(body []byte) Verdict {
 }
 
 func (s *EntropyScanner) ScanResponse(body []byte) ([]byte, Verdict) {
-	for _, tok := range entropyTokenPattern.FindAll(body, -1) {
-		e := shannonEntropyBitsPerChar(string(tok))
-		if e >= entropyThresholdBitsPerChar {
-			return body, Verdict{
-				Action:  Flag,
-				Scanner: s.Name(),
-				Detail:  fmt.Sprintf("high-entropy token (%.2f bits/char, %d chars)", e, len(tok)),
-			}
-		}
+	if matched, detail := entropyMatch(body); matched {
+		return body, Verdict{Action: Flag, Scanner: s.Name(), Detail: detail}
 	}
 	return body, Verdict{Action: Allow, Scanner: s.Name()}
+}
+
+// entropyMatch is the detection logic ScanResponse and NewResponseWindow
+// both drive: the first entropyTokenPattern candidate in buf whose
+// per-character entropy clears entropyThresholdBitsPerChar, if any.
+// Factored out (issue #61) so the windowed path can't drift from the
+// buffered one.
+func entropyMatch(buf []byte) (matched bool, detail string) {
+	for _, tok := range entropyTokenPattern.FindAll(buf, -1) {
+		e := shannonEntropyBitsPerChar(string(tok))
+		if e >= entropyThresholdBitsPerChar {
+			return true, fmt.Sprintf("high-entropy token (%.2f bits/char, %d chars)", e, len(tok))
+		}
+	}
+	return false, ""
+}
+
+// NewResponseWindow implements StreamScanner (issue #61): windowed,
+// boundary-safe high-entropy-token flagging for streamed (SSE)
+// responses, using the exact same detection logic ScanResponse above
+// already applies. Flag-only, same as the buffered path -- never
+// redacts, so the relayed bytes are always the upstream's original ones.
+func (s *EntropyScanner) NewResponseWindow() ResponseWindow {
+	return &windowedFlagger{scanner: s.Name(), margin: defaultWindowMargin, match: entropyMatch}
 }
