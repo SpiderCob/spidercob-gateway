@@ -107,10 +107,18 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	case "high_entropy_split":
 		// A long, random-looking token matching no named secret pattern
 		// -- exactly the "unknown-shaped secret" EntropyScanner exists
-		// to flag -- split mid-token across two writes.
+		// to flag -- split mid-token across two writes. The separator
+		// before the token is ": " (colon+space), not "=" -- both are
+		// outside entropyTokenPattern's alphabet, unlike "=", which
+		// would otherwise extend the contiguous candidate run into
+		// "token=<first half>" and let chunk 1 alone already clear the
+		// 20-char minimum, defeating the point of this fixture (a real
+		// bug this issue's own self-review caught: the original "="
+		// separator meant chunk 1 alone already flagged, so this fixture
+		// wasn't actually proving cross-chunk-boundary detection).
 		token := "qX7z2mKpL9wR4vT8nY1sB6cJ0hF3dG5a"
 		mid := len(token) / 2
-		write([]byte("data: token=" + token[:mid]))
+		write([]byte("data: token: " + token[:mid]))
 		time.Sleep(20 * time.Millisecond)
 		write([]byte(token[mid:] + " more log\n\n"))
 		return

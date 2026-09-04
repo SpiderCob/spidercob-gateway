@@ -446,3 +446,70 @@ func TestInjectionScanner_WindowFlagsOnlyOnceAcrossMultipleMatches(t *testing.T)
 		t.Fatalf("expected exactly one flag verdict despite two qualifying phrases, got %+v", verdicts)
 	}
 }
+
+func TestWindowedFlagger_FlushMatchAlsoSetsFlagged(t *testing.T) {
+	// White-box regression (issue #61 self-review): a match found only by
+	// Flush must still set the "flag once" latch, matching Feed's own
+	// match branch -- otherwise a stray call after Flush could
+	// double-flag. Neither real scanner's match function can actually
+	// reach "Flush finds a match Feed didn't" (Feed always checks match
+	// on the full held-plus-chunk buffer before anything is held, so a
+	// real match is always caught there first) -- this constructs
+	// windowedFlagger directly with a call-counting fake predicate to
+	// exercise Flush's own match branch specifically, testing the
+	// struct's contract rather than depending on a real scanner's
+	// detection logic to reach the state.
+	calls := 0
+	w := &windowedFlagger{
+		scanner: "fake",
+		margin:  100,
+		match: func(buf []byte) (bool, string) {
+			calls++
+			return calls > 1, "fake-match" // false on Feed's check, true from then on
+		},
+	}
+	out, verdicts := w.Feed([]byte("hello"))
+	if out != nil || len(verdicts) != 0 {
+		t.Fatalf("expected nothing flushed and no verdict yet (under margin, fake match=false), got out=%q verdicts=%+v", out, verdicts)
+	}
+	flushedOut, flushVerdicts := w.Flush()
+	if string(flushedOut) != "hello" {
+		t.Fatalf("got %q, want %q", flushedOut, "hello")
+	}
+	if len(flushVerdicts) != 1 || flushVerdicts[0].Action != Flag {
+		t.Fatalf("expected exactly one flag verdict from Flush, got %+v", flushVerdicts)
+	}
+	// Without the fix, w.flagged would still be false here, so this Feed
+	// would call match() a third time (still true) and raise a second
+	// verdict for what's already been reported.
+	moreOut, moreVerdicts := w.Feed([]byte("more"))
+	if string(moreOut) != "more" {
+		t.Fatalf("got %q, want %q", moreOut, "more")
+	}
+	if len(moreVerdicts) != 0 {
+		t.Fatalf("expected no further verdicts once Flush already flagged, got %+v", moreVerdicts)
+	}
+}
+
+func TestEntropyScanner_WindowFlaggedPassthroughDoesNotAliasCallerBuffer(t *testing.T) {
+	// Self-review regression (issue #61): once flagged, Feed must return
+	// a copy of chunk, not the caller's own backing array -- otherwise a
+	// caller that reuses/mutates its chunk slice after Feed returns
+	// (internal/proxy's forwardStreaming reuses one read buffer across
+	// its whole copy loop) could corrupt bytes already handed to a
+	// downstream stage or the client.
+	s := NewEntropyScanner()
+	w := s.NewResponseWindow()
+	// Flag on the first Feed so every later call takes the passthrough
+	// branch this test targets.
+	_, verdicts := w.Feed([]byte(`{"a":"` + fakeHighEntropyToken + `"}`))
+	if len(verdicts) != 1 {
+		t.Fatalf("expected the window to be flagged after the first Feed, got %+v", verdicts)
+	}
+	shared := []byte("mutate me")
+	out, _ := w.Feed(shared)
+	shared[0] = 'X' // mutate the caller's own buffer, simulating reuse
+	if string(out) != "mutate me" {
+		t.Fatalf("returned bytes changed when the caller's buffer was mutated afterward -- aliased instead of copied, got %q", out)
+	}
+}

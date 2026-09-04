@@ -208,8 +208,14 @@ check_contains "flag-only: the phrase itself still reaches the client unmodified
 metrics_body=$(curl -sS "${base}/metrics")
 check_contains "spidercob_streamed_responses_total metric present" "$metrics_body" "spidercob_streamed_responses_total"
 check_contains "spidercob_stream_cap_exceeded_total metric present" "$metrics_body" "spidercob_stream_cap_exceeded_total"
-check_contains "entropy scanner flag verdict recorded for the streamed response" "$metrics_body" 'spidercob_scan_verdicts_total{scanner="entropy",action="flag",direction="response",node="streamy"}'
-check_contains "injection scanner flag verdict recorded for the streamed response" "$metrics_body" 'spidercob_scan_verdicts_total{scanner="injection-heuristics",action="flag",direction="response",node="streamy"}'
+# Exact-value checks, not just substring presence -- a windowedFlagger
+# that double-flagged (e.g. a "flag once" regression) would still pass a
+# bare check_contains here, since the metric line would just carry a
+# larger number under the same label set.
+entropy_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="entropy",action="flag",direction="response",node="streamy"}')
+injection_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="injection-heuristics",action="flag",direction="response",node="streamy"}')
+check "entropy scanner flagged the streamed response exactly once" "$(echo "$entropy_flag_line" | awk '{print $2}')" "1"
+check "injection scanner flagged the streamed response exactly once" "$(echo "$injection_flag_line" | awk '{print $2}')" "1"
 
 echo
 echo "==> ${pass} passed, ${fail} failed"
