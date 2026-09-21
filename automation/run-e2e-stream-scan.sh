@@ -212,8 +212,8 @@ check_contains "spidercob_stream_cap_exceeded_total metric present" "$metrics_bo
 # that double-flagged (e.g. a "flag once" regression) would still pass a
 # bare check_contains here, since the metric line would just carry a
 # larger number under the same label set.
-entropy_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="entropy",action="flag",direction="response",node="streamy"}')
-injection_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="injection-heuristics",action="flag",direction="response",node="streamy"}')
+entropy_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="entropy",action="flag",direction="response",node="streamy"}' || true)
+injection_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="injection-heuristics",action="flag",direction="response",node="streamy"}' || true)
 check "entropy scanner flagged the streamed response exactly once" "$(echo "$entropy_flag_line" | awk '{print $2}')" "1"
 check "injection scanner flagged the streamed response exactly once" "$(echo "$injection_flag_line" | awk '{print $2}')" "1"
 
