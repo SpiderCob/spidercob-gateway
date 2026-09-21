@@ -100,11 +100,36 @@ func (s *InjectionScanner) ScanRequest(body []byte) Verdict {
 // ScanRequest); the body returned to the caller is always the original,
 // unmodified bytes — normalization is detection-only.
 func (s *InjectionScanner) ScanResponse(body []byte) ([]byte, Verdict) {
-	normalized := normalizeForDetection(body)
-	for _, re := range injectionPatterns {
-		if re.Match(normalized) {
-			return body, Verdict{Action: Flag, Scanner: s.Name(), Detail: "response-embedded: " + re.String()}
-		}
+	if matched, detail := injectionResponseMatch(body); matched {
+		return body, Verdict{Action: Flag, Scanner: s.Name(), Detail: detail}
 	}
 	return body, Verdict{Action: Allow, Scanner: s.Name()}
+}
+
+// injectionResponseMatch is the detection logic ScanResponse and
+// NewResponseWindow both drive: does buf, once normalized the same way
+// ScanRequest already normalizes (homoglyph/zero-width evasion
+// resistance), contain any response-embedded injection pattern. Factored
+// out (issue #61) so the windowed path can't drift from the buffered
+// one.
+func injectionResponseMatch(buf []byte) (matched bool, detail string) {
+	normalized := normalizeForDetection(buf)
+	for _, re := range injectionPatterns {
+		if re.Match(normalized) {
+			return true, "response-embedded: " + re.String()
+		}
+	}
+	return false, ""
+}
+
+// NewResponseWindow implements StreamScanner (issue #61): windowed,
+// boundary-safe injection-phrase flagging for streamed (SSE) responses,
+// matching against a normalized copy of the buffer exactly as
+// ScanResponse above already does -- the same evasion resistance
+// (homoglyph/zero-width normalization) applies to a streamed response
+// too. Flag-only, same as the buffered path -- never redacts, and the
+// raw (unnormalized) bytes are always what gets relayed; normalization
+// here is detection-only, same contract as the buffered path's own.
+func (s *InjectionScanner) NewResponseWindow() ResponseWindow {
+	return &windowedFlagger{scanner: s.Name(), margin: defaultWindowMargin, match: injectionResponseMatch}
 }

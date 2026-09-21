@@ -8,15 +8,16 @@ package scan
 // per-scanner fallback today (design doc §6: "streaming responses
 // scanned in windowed chunks with redaction applied before flush").
 //
-// SecretScanner and PIIScanner implement this (issue #55, window.go) --
-// the two scanners that already redact unconditionally in the buffered
-// chain. EntropyScanner/InjectionScanner (flag-only) still don't; a
-// streamed response gets secret/PII redaction but not entropy/injection
-// flagging until a follow-up closes that gap. internal/proxy's
-// forwardStreaming is the real consumer: it composes a Chain's
-// implementing scanners into one window (Chain.NewResponseWindow) and
-// relays an SSE response through it incrementally, falling back to the
-// buffered path entirely if no scanner in the chain implements this.
+// SecretScanner and PIIScanner implement this via windowedRedactor
+// (issue #55, window.go) -- the two scanners that already redact
+// unconditionally in the buffered chain. EntropyScanner and
+// InjectionScanner (flag-only, never redact) implement it too, via the
+// separate windowedFlagger (issue #61, window.go) -- a streamed response
+// now gets the same four-scanner coverage a buffered one does.
+// internal/proxy's forwardStreaming is the real consumer: it composes a
+// Chain's implementing scanners into one window (Chain.NewResponseWindow)
+// and relays an SSE response through it incrementally, falling back to
+// the buffered path entirely if no scanner in the chain implements this.
 type StreamScanner interface {
 	Scanner
 	// NewResponseWindow returns a fresh, stateful window for one streaming

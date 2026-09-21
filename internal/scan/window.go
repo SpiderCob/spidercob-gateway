@@ -156,6 +156,88 @@ func (w *windowedRedactor) Flush() ([]byte, []Verdict) {
 	return out.Bytes(), verdicts
 }
 
+// windowedFlagger is the shared ResponseWindow implementation for
+// flag-only (non-redacting) scanners -- EntropyScanner and
+// InjectionScanner (issue #61). Unlike windowedRedactor, it never
+// rewrites the bytes it relays: match reports whether buf currently
+// contains a qualifying match (using the exact same detection logic the
+// scanner's own buffered ScanResponse already runs) and, if so, the
+// verdict detail text to report.
+//
+// "Flag once, then stop" (issue #61 spec): once a windowedFlagger has
+// raised its one verdict for a response, it stops scanning entirely and
+// becomes pure passthrough for whatever's left -- mirroring
+// EntropyScanner/InjectionScanner's own buffered ScanResponse, which
+// already returns on the first match found. This is what lets it avoid
+// any positional bookkeeping for a match that happens to still be
+// visible inside the held-back margin across multiple Feed calls: once
+// flagged, the question of "have I already reported this exact match"
+// never comes up.
+//
+// margin is the same fixed hold-back defaultWindowMargin already uses
+// for windowedRedactor, and carries the identical documented limit: a
+// qualifying match longer than margin, still arriving across a chunk
+// boundary, could in principle be missed. Simpler than windowedRedactor
+// by construction -- with nothing ever rewritten, match is checked
+// against the whole held-plus-new-chunk buffer on every Feed rather than
+// needing matchSpan's per-match redaction-boundary bookkeeping. The
+// tradeoff: match re-scans that whole buffer (bounded by margin plus one
+// chunk, never the whole stream) on every Feed call until it fires,
+// rather than only the boundary-adjacent new bytes -- a real, deliberate
+// CPU cost for the simplicity, not a correctness concern (self-review,
+// issue #61).
+type windowedFlagger struct {
+	scanner string
+	margin  int
+	match   func(buf []byte) (matched bool, detail string)
+	flagged bool
+	held    []byte
+}
+
+func (w *windowedFlagger) Feed(chunk []byte) ([]byte, []Verdict) {
+	if w.flagged {
+		// Caller (internal/proxy's forwardStreaming) writes and reuses
+		// its read buffer synchronously before the next Feed, so
+		// returning chunk verbatim is safe today -- copied anyway for
+		// consistency with every other return path in this file, and to
+		// not depend on that caller detail holding forever (self-review,
+		// issue #61).
+		return append([]byte(nil), chunk...), nil
+	}
+	buf := append(w.held, chunk...)
+	if matched, detail := w.match(buf); matched {
+		w.flagged = true
+		w.held = nil
+		return buf, []Verdict{{Action: Flag, Scanner: w.scanner, Detail: detail}}
+	}
+	if len(buf) <= w.margin {
+		w.held = buf
+		return nil, nil
+	}
+	safeLen := len(buf) - w.margin
+	out := append([]byte(nil), buf[:safeLen]...)
+	w.held = append([]byte(nil), buf[safeLen:]...)
+	return out, nil
+}
+
+func (w *windowedFlagger) Flush() ([]byte, []Verdict) {
+	held := w.held
+	w.held = nil
+	if w.flagged || len(held) == 0 {
+		return held, nil
+	}
+	if matched, detail := w.match(held); matched {
+		// Mirrors Feed's own match branch (self-review, issue #61): a
+		// ResponseWindow's contract is one call to Flush per response,
+		// but setting flagged here too means a stray Feed/Flush call
+		// after this one still can't double-flag, rather than relying
+		// solely on every current caller's own discipline.
+		w.flagged = true
+		return held, []Verdict{{Action: Flag, Scanner: w.scanner, Detail: detail}}
+	}
+	return held, nil
+}
+
 // chainWindow composes one ResponseWindow per StreamScanner-implementing
 // scanner in a Chain, in the chain's own order -- mirroring how
 // Chain.ScanResponse threads a buffered body through each scanner in

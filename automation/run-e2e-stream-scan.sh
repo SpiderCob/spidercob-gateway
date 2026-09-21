@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Real end-to-end smoke test for issue #55 (windowed streaming/SSE
+# Real end-to-end smoke test for issue #55/#61 (windowed streaming/SSE
 # response scanning): drives the actual compiled gateway binary against
 # a real, separate streamable_http upstream process (internal/proxy/
 # testdata/sseupstream), through real curl requests -- not the in-process
 # httptest fixtures internal/proxy's own unit/integration tests already
-# use. Three properties, each needing the real compiled binary + a real
+# use. Five properties, each needing the real compiled binary + a real
 # TCP round trip to actually prove:
 #
 #   1. a secret split across a real chunk boundary is still redacted
@@ -16,6 +16,12 @@
 #   3. a stream that would otherwise run forever is cut off at the
 #      response size cap -- proven by real received-byte-count bounds
 #      and real elapsed time well under curl's own timeout.
+#   4. a high-entropy unnamed-secret token split across a real chunk
+#      boundary is still flagged (issue #61), and reaches the client
+#      byte-for-byte unmodified -- EntropyScanner is flag-only.
+#   5. a prompt-injection phrase split across a real chunk boundary is
+#      still flagged (issue #61), and likewise reaches the client
+#      unmodified -- InjectionScanner is flag-only.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -186,9 +192,30 @@ elapsed_ok=$(awk -v s="$cap_elapsed" 'BEGIN { print (s < 5) ? "true" : "false" }
 check_true "received ~10 MiB, not unbounded (got ${received_bytes} bytes)" "$bytes_ok"
 check_true "connection ended promptly (${cap_elapsed}s), the gateway cut it off, not curl's own timeout" "$elapsed_ok"
 
+echo "==> 4: a high-entropy token split across a real chunk boundary is flagged, not redacted"
+entropy_body=$(curl -sS -X POST "${base}/mcp/streamy/" \
+	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
+	-d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"high_entropy_split"}}')
+fake_high_entropy_token="qX7z2mKpL9wR4vT8nY1sB6cJ0hF3dG5a"
+check_contains "flag-only: the token itself still reaches the client unmodified" "$entropy_body" "$fake_high_entropy_token"
+
+echo "==> 5: a prompt-injection phrase split across a real chunk boundary is flagged, not redacted"
+injection_body=$(curl -sS -X POST "${base}/mcp/streamy/" \
+	-H "Authorization: Bearer ${token}" -H "Mcp-Session-Id: ${session_id}" \
+	-d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"injection_split"}}')
+check_contains "flag-only: the phrase itself still reaches the client unmodified" "$injection_body" "ignore previous instructions"
+
 metrics_body=$(curl -sS "${base}/metrics")
 check_contains "spidercob_streamed_responses_total metric present" "$metrics_body" "spidercob_streamed_responses_total"
 check_contains "spidercob_stream_cap_exceeded_total metric present" "$metrics_body" "spidercob_stream_cap_exceeded_total"
+# Exact-value checks, not just substring presence -- a windowedFlagger
+# that double-flagged (e.g. a "flag once" regression) would still pass a
+# bare check_contains here, since the metric line would just carry a
+# larger number under the same label set.
+entropy_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="entropy",action="flag",direction="response",node="streamy"}' || true)
+injection_flag_line=$(echo "$metrics_body" | grep -F 'spidercob_scan_verdicts_total{scanner="injection-heuristics",action="flag",direction="response",node="streamy"}' || true)
+check "entropy scanner flagged the streamed response exactly once" "$(echo "$entropy_flag_line" | awk '{print $2}')" "1"
+check "injection scanner flagged the streamed response exactly once" "$(echo "$injection_flag_line" | awk '{print $2}')" "1"
 
 echo
 echo "==> ${pass} passed, ${fail} failed"

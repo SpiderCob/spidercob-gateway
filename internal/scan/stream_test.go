@@ -81,21 +81,16 @@ func TestResponseWindow_HoldsBackSplitMatchAcrossChunks(t *testing.T) {
 	}
 }
 
-func TestOnlyRedactingScannersImplementStreamScanner(t *testing.T) {
-	// Issue #55: SecretScanner and PIIScanner (the two scanners that
-	// already redact unconditionally in the buffered chain) implement
-	// windowed streaming. EntropyScanner/InjectionScanner (flag-only)
-	// deliberately don't yet -- proxy.go's streaming path must keep
-	// falling back to buffered-only scanning for those two until a
-	// follow-up closes that gap (issue #55 spec's Out of Scope).
-	want := map[string]bool{
-		"secrets": true,
-		"pii":     true,
-	}
+func TestAllDefaultScannersImplementStreamScanner(t *testing.T) {
+	// Issue #55 gave SecretScanner/PIIScanner (the two that already
+	// redact unconditionally in the buffered chain) windowed streaming.
+	// Issue #61 closed the remaining gap: EntropyScanner/InjectionScanner
+	// (flag-only) now implement it too, via a separate, non-redacting
+	// ResponseWindow. No scanner in the default chain falls back to
+	// buffered-only scanning on a streamed response any more.
 	for _, s := range Default().Scanners {
-		_, implements := s.(StreamScanner)
-		if implements != want[s.Name()] {
-			t.Errorf("%s: StreamScanner implemented=%v, want %v", s.Name(), implements, want[s.Name()])
+		if _, implements := s.(StreamScanner); !implements {
+			t.Errorf("%s: expected StreamScanner to be implemented", s.Name())
 		}
 	}
 }
