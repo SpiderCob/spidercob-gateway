@@ -131,6 +131,13 @@ func (a *AdminAPI) Routes() http.Handler {
 	mux.HandleFunc("POST /admin/agents", a.gateBrowserOrService(a.createAgent))
 	mux.HandleFunc("DELETE /admin/agents/{client_id}", a.gateBrowserOrService(a.revokeAgent))
 
+	// Proxies (issue #63, design.md §10) -- same dual-trust gate as
+	// agents from the start, same reasoning: a proxy's client_id/secret
+	// is exactly as sensitive as an agent's.
+	mux.HandleFunc("GET /admin/proxies", a.gateBrowserOrService(a.listProxies))
+	mux.HandleFunc("POST /admin/proxies", a.gateBrowserOrService(a.createProxy))
+	mux.HandleFunc("DELETE /admin/proxies/{client_id}", a.gateBrowserOrService(a.revokeProxy))
+
 	mux.HandleFunc("GET /admin/groups", a.gateBrowserOrService(a.listGroups))
 	mux.HandleFunc("POST /admin/groups", a.gateBrowserOrService(a.createGroup))
 	mux.HandleFunc("DELETE /admin/groups/{name}", a.gateBrowserOrService(a.deleteGroup))
@@ -384,6 +391,86 @@ func (a *AdminAPI) revokeAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.logAdminAction(r, "revoke_agent", clientID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Proxies (issue #63, design.md §10) ---
+//
+// listProxies/createProxy/revokeProxy are the Proxy-table twins of the
+// three Agent handlers just above -- identical shape, identical
+// gateBrowserOrService gating, identical "secret returned exactly once"
+// contract. A proxy is a self-hosted fleet control plane's other
+// principal kind: a data-plane gateway instance pairing to pull/receive
+// policy in a later phase, never a tools/call-ing NHI, hence a separate
+// type/table/endpoint family rather than folding into Agent.
+
+type proxyResponse struct {
+	ClientID  string  `json:"client_id"`
+	Name      string  `json:"name"`
+	CreatedAt string  `json:"created_at"`
+	RevokedAt *string `json:"revoked_at,omitempty"`
+}
+
+func toProxyResponse(p store.Proxy) proxyResponse {
+	resp := proxyResponse{ClientID: p.ClientID, Name: p.Name, CreatedAt: p.CreatedAt.Format(time.RFC3339)}
+	if p.RevokedAt != nil {
+		s := p.RevokedAt.Format(time.RFC3339)
+		resp.RevokedAt = &s
+	}
+	return resp
+}
+
+func (a *AdminAPI) listProxies(w http.ResponseWriter, r *http.Request) {
+	proxies, err := a.store.ListProxies(r.Context())
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to list proxies")
+		return
+	}
+	out := make([]proxyResponse, 0, len(proxies))
+	for _, p := range proxies {
+		out = append(out, toProxyResponse(p))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type createProxyRequest struct {
+	Name string `json:"name"`
+}
+
+type createProxyResponse struct {
+	ClientID string `json:"client_id"`
+	// Secret is returned exactly once, the same contract
+	// identity.Service.CreateProxy already documents.
+	Secret string `json:"secret"`
+	Name   string `json:"name"`
+}
+
+func (a *AdminAPI) createProxy(w http.ResponseWriter, r *http.Request) {
+	var req createProxyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		writeAdminError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	proxy, secret, err := a.identity.CreateProxy(r.Context(), req.Name)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, "failed to create proxy")
+		return
+	}
+	a.logAdminAction(r, "create_proxy", proxy.ClientID)
+	writeJSON(w, http.StatusCreated, createProxyResponse{ClientID: proxy.ClientID, Secret: secret, Name: proxy.Name})
+}
+
+func (a *AdminAPI) revokeProxy(w http.ResponseWriter, r *http.Request) {
+	clientID := r.PathValue("client_id")
+	if err := a.store.RevokeProxy(r.Context(), clientID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeAdminError(w, http.StatusNotFound, "proxy not found")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "failed to revoke proxy")
+		return
+	}
+	a.logAdminAction(r, "revoke_proxy", clientID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

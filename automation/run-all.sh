@@ -20,6 +20,8 @@ echo
 echo
 "$script_dir/run-e2e-adminapi.sh"
 echo
+"$script_dir/run-e2e-proxies.sh"
+echo
 "$script_dir/run-e2e-nodes.sh"
 echo
 "$script_dir/run-e2e-adminui-session.sh"

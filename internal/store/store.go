@@ -62,6 +62,25 @@ type Agent struct {
 	RevokedAt  *time.Time
 }
 
+// Proxy is a self-hosted fleet control plane's other principal kind
+// (issue #63, design.md §10): a data-plane gateway instance that
+// authenticates to the control plane to pair and, in a later phase,
+// receive signed policy bundles over a tunnel. Structurally identical to
+// Agent (same client_credentials shape, same soft-revocation contract --
+// AuthenticateProxy must treat a revoked proxy's otherwise-valid secret
+// as ErrInvalidCredentials, exactly like AuthenticateAgent already does)
+// but kept as its own type/table rather than folded into Agent: a proxy
+// never calls tools/call against a node, so conflating the two would
+// make "list agents" and "list proxies" the same ambiguous query.
+type Proxy struct {
+	ID         int64
+	ClientID   string
+	SecretHash string
+	Name       string
+	CreatedAt  time.Time
+	RevokedAt  *time.Time
+}
+
 // Group is a named policy-assignment target. Membership tables
 // (user_groups, agent_groups) exist and are assignable starting this
 // phase, but nothing reads them for access decisions until Phase 3's
@@ -211,6 +230,18 @@ type Store interface {
 	// row). Idempotent: revoking an already-revoked agent is not an error.
 	// Returns ErrNotFound if no agent with this client_id exists.
 	RevokeAgent(ctx context.Context, clientID string) error
+
+	// CreateProxy/GetProxyByClientID/GetProxyByID/ListProxies/RevokeProxy
+	// (issue #63) mirror the Agent methods immediately above exactly --
+	// same signatures, same ErrConflict/ErrNotFound/idempotency contracts,
+	// same "ListProxies never populates SecretHash" posture. Proxy is a
+	// separate type/table, not a shared "kind" column, so this is genuine
+	// duplication rather than a parameterization worth abstracting away.
+	CreateProxy(ctx context.Context, clientID, secretHash, name string) (Proxy, error)
+	GetProxyByClientID(ctx context.Context, clientID string) (Proxy, error)
+	GetProxyByID(ctx context.Context, id int64) (Proxy, error)
+	ListProxies(ctx context.Context) ([]Proxy, error)
+	RevokeProxy(ctx context.Context, clientID string) error
 
 	// GetUserByExternalIdentity resolves a user previously JIT-provisioned
 	// for this (issuer, subject) pair. Returns ErrNotFound on first login.

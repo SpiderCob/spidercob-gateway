@@ -114,6 +114,55 @@ func (svc *Service) CreateAgent(ctx context.Context, name string) (agent store.A
 	return agent, secret, nil
 }
 
+// CreateProxy registers a self-hosted fleet control plane's other
+// principal kind (issue #63): a data-plane gateway instance, paired the
+// same way CreateAgent pairs an NHI -- freshly generated client_id and
+// secret, plaintext secret returned exactly once.
+func (svc *Service) CreateProxy(ctx context.Context, name string) (proxy store.Proxy, plaintextSecret string, err error) {
+	clientID, err := randomToken("prx_", 16)
+	if err != nil {
+		return store.Proxy{}, "", err
+	}
+	secret, err := randomToken("", 32)
+	if err != nil {
+		return store.Proxy{}, "", err
+	}
+	hash, err := hashSecret(secret)
+	if err != nil {
+		return store.Proxy{}, "", err
+	}
+	proxy, err = svc.store.CreateProxy(ctx, clientID, hash, name)
+	if err != nil {
+		return store.Proxy{}, "", err
+	}
+	return proxy, secret, nil
+}
+
+// AuthenticateProxy verifies a proxy's client_credentials, mirroring
+// AuthenticateAgent exactly -- unknown client_id, wrong secret, and a
+// revoked proxy's otherwise-correct secret are all indistinguishably
+// ErrInvalidCredentials.
+func (svc *Service) AuthenticateProxy(ctx context.Context, clientID, secret string) (store.Proxy, error) {
+	p, err := svc.store.GetProxyByClientID(ctx, clientID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Proxy{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return store.Proxy{}, err
+	}
+	ok, err := verifySecret(secret, p.SecretHash)
+	if err != nil {
+		return store.Proxy{}, err
+	}
+	if !ok {
+		return store.Proxy{}, ErrInvalidCredentials
+	}
+	if p.RevokedAt != nil {
+		return store.Proxy{}, ErrInvalidCredentials
+	}
+	return p, nil
+}
+
 // UserGroupNames returns the group names username currently belongs to,
 // resolved fresh from the store on every call -- used by the standalone
 // admin-login path (issue #43) to check admin-group membership live on
