@@ -97,6 +97,34 @@ export function revokeAgent(clientId: string): Promise<void> {
   return request<void>('DELETE', `/admin/agents/${encodeURIComponent(clientId)}`)
 }
 
+// Proxy (issue #63, design.md §10): a self-hosted fleet control plane's
+// other principal kind -- a data-plane gateway instance, paired the same
+// way an Agent is. Mirrors the four declarations above exactly.
+export interface Proxy {
+  client_id: string
+  name: string
+  created_at: string
+  revoked_at?: string
+}
+
+export interface CreatedProxy {
+  client_id: string
+  secret: string
+  name: string
+}
+
+export function listProxies(): Promise<Proxy[]> {
+  return request<Proxy[]>('GET', '/admin/proxies')
+}
+
+export function createProxy(name: string): Promise<CreatedProxy> {
+  return request<CreatedProxy>('POST', '/admin/proxies', { name })
+}
+
+export function revokeProxy(clientId: string): Promise<void> {
+  return request<void>('DELETE', `/admin/proxies/${encodeURIComponent(clientId)}`)
+}
+
 // --- Groups ---
 
 export interface Group {

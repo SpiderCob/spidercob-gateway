@@ -332,3 +332,86 @@ func TestTwoAgentsGetDifferentCredentials(t *testing.T) {
 		t.Fatalf("secrets must be unique")
 	}
 }
+
+func TestProxyCreateAndAuthenticate(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	proxy, secret, err := svc.CreateProxy(ctx, "us-east-proxy")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if proxy.ClientID == "" {
+		t.Fatalf("expected a generated client_id")
+	}
+	if secret == "" {
+		t.Fatalf("expected a generated plaintext secret")
+	}
+	if proxy.SecretHash == secret {
+		t.Fatalf("secret must not be stored in plaintext")
+	}
+
+	got, err := svc.AuthenticateProxy(ctx, proxy.ClientID, secret)
+	if err != nil {
+		t.Fatalf("AuthenticateProxy: %v", err)
+	}
+	if got.ID != proxy.ID {
+		t.Fatalf("AuthenticateProxy returned wrong proxy: %+v", got)
+	}
+
+	if _, err := svc.AuthenticateProxy(ctx, proxy.ClientID, "wrong-secret"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong secret = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := svc.AuthenticateProxy(ctx, "unknown-client", secret); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("unknown client_id = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestAuthenticateProxy_RevokedProxyRejected(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	svc := NewService(s)
+	ctx := context.Background()
+
+	proxy, secret, err := svc.CreateProxy(ctx, "revoke-me")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if _, err := svc.AuthenticateProxy(ctx, proxy.ClientID, secret); err != nil {
+		t.Fatalf("AuthenticateProxy (before revocation): %v", err)
+	}
+
+	if err := s.RevokeProxy(ctx, proxy.ClientID); err != nil {
+		t.Fatalf("RevokeProxy: %v", err)
+	}
+
+	// Same non-enumerable-revocation property AuthenticateAgent already
+	// guarantees (issue #13): a revoked proxy's otherwise-correct secret
+	// is rejected exactly like a wrong one.
+	if _, err := svc.AuthenticateProxy(ctx, proxy.ClientID, secret); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("AuthenticateProxy (after revocation) = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestTwoProxiesGetDifferentCredentials(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	p1, s1, err := svc.CreateProxy(ctx, "proxy-1")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	p2, s2, err := svc.CreateProxy(ctx, "proxy-2")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if p1.ClientID == p2.ClientID {
+		t.Fatalf("client_ids must be unique")
+	}
+	if s1 == s2 {
+		t.Fatalf("secrets must be unique")
+	}
+}

@@ -264,6 +264,87 @@ func (s *SQLiteStore) RevokeAgent(ctx context.Context, clientID string) error {
 	return nil
 }
 
+// CreateProxy/GetProxyByClientID/GetProxyByID/ListProxies/RevokeProxy
+// (issue #63) are the Proxy-table twins of the five Agent methods just
+// above -- identical logic against the separate `proxies` table.
+func (s *SQLiteStore) CreateProxy(ctx context.Context, clientID, secretHash, name string) (Proxy, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxies (client_id, secret_hash, name) VALUES (?, ?, ?)`, clientID, secretHash, name)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return Proxy{}, ErrConflict
+		}
+		return Proxy{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Proxy{}, err
+	}
+	return s.GetProxyByID(ctx, id)
+}
+
+func (s *SQLiteStore) GetProxyByClientID(ctx context.Context, clientID string) (Proxy, error) {
+	var p Proxy
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM proxies WHERE client_id = ?`, clientID,
+	).Scan(&p.ID, &p.ClientID, &p.SecretHash, &p.Name, &p.CreatedAt, &p.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Proxy{}, ErrNotFound
+	}
+	return p, err
+}
+
+func (s *SQLiteStore) GetProxyByID(ctx context.Context, id int64) (Proxy, error) {
+	var p Proxy
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, client_id, secret_hash, name, created_at, revoked_at FROM proxies WHERE id = ?`, id,
+	).Scan(&p.ID, &p.ClientID, &p.SecretHash, &p.Name, &p.CreatedAt, &p.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Proxy{}, ErrNotFound
+	}
+	return p, err
+}
+
+// ListProxies intentionally never selects secret_hash -- same reasoning
+// as ListAgents just above.
+func (s *SQLiteStore) ListProxies(ctx context.Context) ([]Proxy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, client_id, name, created_at, revoked_at FROM proxies ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Proxy
+	for rows.Next() {
+		var p Proxy
+		if err := rows.Scan(&p.ID, &p.ClientID, &p.Name, &p.CreatedAt, &p.RevokedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) RevokeProxy(ctx context.Context, clientID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE proxies SET revoked_at = CURRENT_TIMESTAMP WHERE client_id = ? AND revoked_at IS NULL`, clientID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := s.GetProxyByClientID(ctx, clientID); err != nil {
+		return err // ErrNotFound, or a real lookup error
+	}
+	return nil
+}
+
 func (s *SQLiteStore) CreateGroup(ctx context.Context, name string) (Group, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO groups (name) VALUES (?)`, name)
 	if err != nil {

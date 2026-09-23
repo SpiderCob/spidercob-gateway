@@ -981,3 +981,101 @@ func TestConcurrentWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestProxyCRUD(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	p, err := s.CreateProxy(ctx, "client-123", "sechash-1", "us-east-proxy")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if p.ID == 0 || p.ClientID != "client-123" || p.Name != "us-east-proxy" {
+		t.Fatalf("unexpected proxy: %+v", p)
+	}
+
+	byClient, err := s.GetProxyByClientID(ctx, "client-123")
+	if err != nil {
+		t.Fatalf("GetProxyByClientID: %v", err)
+	}
+	if byClient != p {
+		t.Fatalf("GetProxyByClientID returned %+v, want %+v", byClient, p)
+	}
+
+	byID, err := s.GetProxyByID(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("GetProxyByID: %v", err)
+	}
+	if byID != p {
+		t.Fatalf("GetProxyByID returned %+v, want %+v", byID, p)
+	}
+
+	if _, err := s.GetProxyByClientID(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetProxyByClientID(nope) = %v, want ErrNotFound", err)
+	}
+
+	if _, err := s.CreateProxy(ctx, "client-123", "sechash-2", "dup"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate CreateProxy = %v, want ErrConflict", err)
+	}
+}
+
+func TestListProxies(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateProxy(ctx, "client-a", "hash-a", "proxy-a"); err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if _, err := s.CreateProxy(ctx, "client-b", "hash-b", "proxy-b"); err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+
+	proxies, err := s.ListProxies(ctx)
+	if err != nil {
+		t.Fatalf("ListProxies: %v", err)
+	}
+	if len(proxies) != 2 {
+		t.Fatalf("ListProxies = %+v, want 2 proxies", proxies)
+	}
+
+	// Mirrors ListAgents: backs the admin API's GET /admin/proxies, which
+	// never returns or uses secret_hash.
+	for _, p := range proxies {
+		if p.SecretHash != "" {
+			t.Fatalf("ListProxies must not populate SecretHash, got %q for %s", p.SecretHash, p.ClientID)
+		}
+	}
+}
+
+func TestRevokeProxy(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	p, err := s.CreateProxy(ctx, "client-r", "hash", "revoke-me")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if p.RevokedAt != nil {
+		t.Fatalf("newly created proxy has RevokedAt = %v, want nil", p.RevokedAt)
+	}
+
+	if err := s.RevokeProxy(ctx, "client-r"); err != nil {
+		t.Fatalf("RevokeProxy: %v", err)
+	}
+	revoked, err := s.GetProxyByClientID(ctx, "client-r")
+	if err != nil {
+		t.Fatalf("GetProxyByClientID: %v", err)
+	}
+	if revoked.RevokedAt == nil {
+		t.Fatalf("expected RevokedAt to be set after RevokeProxy")
+	}
+
+	// Idempotent: revoking again is not an error.
+	if err := s.RevokeProxy(ctx, "client-r"); err != nil {
+		t.Fatalf("RevokeProxy (again): %v", err)
+	}
+
+	if err := s.RevokeProxy(ctx, "never-existed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RevokeProxy (unknown client_id) = %v, want ErrNotFound", err)
+	}
+}

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { logout, whoami, type WhoAmI } from './api'
 import Login from './screens/Login'
 import Agents from './screens/Agents'
+import Proxies from './screens/Proxies'
 import Groups from './screens/Groups'
 import Policies from './screens/Policies'
 import Nodes from './screens/Nodes'
@@ -9,7 +10,7 @@ import Audit from './screens/Audit'
 import Sessions from './screens/Sessions'
 import './App.css'
 
-type Tab = 'agents' | 'groups' | 'policies' | 'nodes' | 'sessions' | 'audit'
+type Tab = 'agents' | 'proxies' | 'groups' | 'policies' | 'nodes' | 'sessions' | 'audit'
 
 export default function App() {
   // null = still checking; undefined = checked, not logged in.
@@ -52,6 +53,9 @@ export default function App() {
         <button className={tab === 'agents' ? 'active' : ''} onClick={() => setTab('agents')}>
           Agents
         </button>
+        <button className={tab === 'proxies' ? 'active' : ''} onClick={() => setTab('proxies')}>
+          Proxies
+        </button>
         <button className={tab === 'groups' ? 'active' : ''} onClick={() => setTab('groups')}>
           Groups
         </button>
@@ -70,6 +74,7 @@ export default function App() {
       </nav>
       <main>
         {tab === 'agents' && <Agents />}
+        {tab === 'proxies' && <Proxies />}
         {tab === 'groups' && <Groups />}
         {tab === 'policies' && <Policies />}
         {tab === 'nodes' && <Nodes />}

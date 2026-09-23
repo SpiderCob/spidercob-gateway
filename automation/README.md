@@ -95,6 +95,19 @@ rather than a cryptic "command not found."
   store-visible effects via the same API afterward. Not part of
   `make ci-interop` — no Docker needed, runs in `make ci`.
 
+- **`run-e2e-proxies.sh`** — issue #63's `proxy` principal type (Phase 1
+  of the self-hosted fleet control plane, design.md §10), against the
+  real compiled binary, reusing the same `fakespidersnoop` fixture and
+  dual-trust admin-token pattern issue #13's e2e already established.
+  Drives real `POST/GET/DELETE /admin/proxies` — create, confirm listed
+  without its secret ever appearing in the list response, confirm the
+  same dual-trust gate agents already have (missing human-session header
+  rejected), revoke, confirm idempotent re-revoke, confirm an unknown
+  client_id 404s. Deliberately proves only the admin-facing identity
+  piece — no tunnel, no bundle, nothing proxy-side yet; those are later
+  phases. Not part of `make ci-interop` — no Docker needed, runs in
+  `make ci`.
+
 - **`run-e2e-nodes.sh`** — issue #15's node registration (Phase 4b), against the real compiled binary, including a real process restart; updated by issue #57 (hot-reload) since its original DoD moment — the node being **not yet reachable** before a restart — was exactly the behavior issue #57 exists to make false. Now: a node is registered via `POST /admin/nodes` against a gateway running with zero configured MCP nodes, confirmed listed immediately, confirmed **already reachable on that same still-running process** (a real per-node token mints, `/mcp/echo/` routes) — then the same binary is actually killed and relaunched against the same `store_db_path`, and the node is confirmed to still be reachable afterward: a real session, a real `tools/call`. Proves the node's registration genuinely *persists* across a real restart against the real process lifecycle, not that a restart is required — `run-e2e-hot-reload.sh` (issue #57) is the dedicated, thorough no-restart-needed proof. Not part of `make ci-interop` — no Docker needed, runs in `make ci`.
 
 - **`run-e2e-adminui-session.sh`** — issue #17's admin UI session/cookie

@@ -222,6 +222,85 @@ func TestRevokeAgent_UnknownRejected(t *testing.T) {
 	}
 }
 
+// --- Proxies (issue #63) --- mirrors the Agents block just above exactly.
+
+func TestCreateProxy_Succeeds(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	body, _ := json.Marshal(createProxyRequest{Name: "us-east-proxy"})
+	rec := fullyAuthedRequest(api, "POST", "/admin/proxies", body)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d, want 201, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp createProxyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ClientID == "" || resp.Secret == "" || resp.Name != "us-east-proxy" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if _, err := s.GetProxyByClientID(context.Background(), resp.ClientID); err != nil {
+		t.Fatalf("proxy not actually persisted: %v", err)
+	}
+}
+
+func TestCreateProxy_MissingNameRejected(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	rec := fullyAuthedRequest(api, "POST", "/admin/proxies", []byte(`{}`))
+	if rec.Code != 400 {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListProxies_ReturnsCreatedProxies(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	ctx := context.Background()
+	if _, _, err := identity.NewService(s).CreateProxy(ctx, "a"); err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	if _, _, err := identity.NewService(s).CreateProxy(ctx, "b"); err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	rec := fullyAuthedRequest(api, "GET", "/admin/proxies", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var proxies []proxyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &proxies); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(proxies) != 2 {
+		t.Fatalf("proxies = %+v, want 2", proxies)
+	}
+}
+
+func TestRevokeProxy_Succeeds(t *testing.T) {
+	api, s := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	ctx := context.Background()
+	proxy, _, err := identity.NewService(s).CreateProxy(ctx, "us-east-proxy")
+	if err != nil {
+		t.Fatalf("CreateProxy: %v", err)
+	}
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/proxies/"+proxy.ClientID, nil)
+	if rec.Code != 204 {
+		t.Fatalf("status = %d, want 204, body = %s", rec.Code, rec.Body.String())
+	}
+	got, err := s.GetProxyByClientID(ctx, proxy.ClientID)
+	if err != nil {
+		t.Fatalf("GetProxyByClientID: %v", err)
+	}
+	if got.RevokedAt == nil {
+		t.Fatal("expected proxy to be revoked")
+	}
+}
+
+func TestRevokeProxy_UnknownRejected(t *testing.T) {
+	api, _ := newTestAdminAPI(t, validAdminAuthn(), adminIntrospector())
+	rec := fullyAuthedRequest(api, "DELETE", "/admin/proxies/never-existed", nil)
+	if rec.Code != 404 {
+		t.Fatalf("status = %d, want 404, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- Groups ---
 
 func TestCreateGroup_Succeeds(t *testing.T) {
