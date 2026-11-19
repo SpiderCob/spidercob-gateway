@@ -39,6 +39,25 @@ func authorize(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+testBearerToken)
 }
 
+// multiPrincipalValidator maps distinct bearer tokens to distinct
+// principals, for tests that need two differently-authenticated callers
+// (e.g. session hijack across principals) -- fakeValidator above
+// collapses every valid token to the same "user:test" principal, which
+// can't exercise that.
+type multiPrincipalValidator map[string]string
+
+func (v multiPrincipalValidator) ValidateAccessToken(node, token string) (AuthClaims, error) {
+	subject, ok := v[token]
+	if !ok {
+		return AuthClaims{}, errors.New("multiPrincipalValidator: invalid token")
+	}
+	return AuthClaims{Subject: subject}, nil
+}
+
+func authorizeAs(req *http.Request, token string) {
+	req.Header.Set("Authorization", "Bearer "+token)
+}
+
 func newStdioTestGateway(t *testing.T) *Gateway {
 	t.Helper()
 	cfg := &config.Config{
@@ -134,6 +153,10 @@ func (f *fakeUpstreamServer) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func newHTTPTestGateway(t *testing.T, upstreamURL string) *Gateway {
+	return newHTTPTestGatewayWithValidator(t, upstreamURL, fakeValidator{})
+}
+
+func newHTTPTestGatewayWithValidator(t *testing.T, upstreamURL string, validator TokenValidator) *Gateway {
 	t.Helper()
 	cfg := &config.Config{
 		Listen: ":0",
@@ -141,7 +164,7 @@ func newHTTPTestGateway(t *testing.T, upstreamURL string) *Gateway {
 			{Name: "jira", Transport: config.TransportStreamableHTTP, UpstreamURL: upstreamURL},
 		},
 	}
-	gw, err := New(cfg, fakeValidator{})
+	gw, err := New(cfg, validator)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -319,6 +342,113 @@ func TestGateway_DeleteTearsDownUpstreamSessionAndRejectsReuse(t *testing.T) {
 	rec2 := doWithSession(gw, "jira", sessionID, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{}}`)
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("status after DELETE = %d, want %d", rec2.Code, http.StatusNotFound)
+	}
+}
+
+// TestGateway_SessionRejectsRequestFromDifferentPrincipal is the session
+// hijack regression: a session ID is only ever handed to the principal
+// that minted it (over the response header/body on initialize), but
+// nothing before this test stopped a *different*, independently
+// authenticated principal from reusing it if they obtained it some other
+// way (logs, a shared proxy, guessing) -- the only checks were "does this
+// session exist" and "is it for this node," never "is it this caller's."
+// A session must be rejected exactly like an unknown one (same 404, no
+// distinguishing signal) for any principal other than the one that
+// created it.
+func TestGateway_SessionRejectsRequestFromDifferentPrincipal(t *testing.T) {
+	const tokenOwner = "token-owner"
+	const tokenAttacker = "token-attacker"
+	validator := multiPrincipalValidator{
+		tokenOwner:    "agent:owner",
+		tokenAttacker: "agent:attacker",
+	}
+	upstream, _ := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	gw := newHTTPTestGatewayWithValidator(t, upstream.URL, validator)
+
+	initReq := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	authorizeAs(initReq, tokenOwner)
+	initRec := httptest.NewRecorder()
+	gw.ServeHTTP(initRec, initReq)
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("initialize failed: status = %d, body = %s", initRec.Code, initRec.Body.String())
+	}
+	sessionID := initRec.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("expected a Mcp-Session-Id header on the initialize response")
+	}
+
+	hijackReq := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{}}`))
+	authorizeAs(hijackReq, tokenAttacker)
+	hijackReq.Header.Set("Mcp-Session-Id", sessionID)
+	hijackRec := httptest.NewRecorder()
+	gw.ServeHTTP(hijackRec, hijackReq)
+	if hijackRec.Code != http.StatusNotFound {
+		t.Fatalf("hijack attempt status = %d, want %d (same as unknown session, body = %s)", hijackRec.Code, http.StatusNotFound, hijackRec.Body.String())
+	}
+
+	// The legitimate owner's session must still be usable afterward --
+	// rejecting the attacker must not have torn down or otherwise
+	// disturbed the real owner's session.
+	ownReq := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}}`))
+	authorizeAs(ownReq, tokenOwner)
+	ownReq.Header.Set("Mcp-Session-Id", sessionID)
+	ownRec := httptest.NewRecorder()
+	gw.ServeHTTP(ownRec, ownReq)
+	if ownRec.Code != http.StatusOK {
+		t.Fatalf("owner's own follow-up request status = %d, want %d, body = %s", ownRec.Code, http.StatusOK, ownRec.Body.String())
+	}
+}
+
+// TestGateway_DeleteRejectsSessionFromDifferentPrincipal is the DELETE
+// counterpart: handleDelete's own comment already says "a caller who
+// authenticated against this node may always end their own session" --
+// the code didn't actually enforce "their own," so any principal valid
+// for the node could end anyone else's session on it (a denial-of-service
+// variant of the same hijack class). The attacker's DELETE must be
+// rejected without tearing down the real owner's upstream session.
+func TestGateway_DeleteRejectsSessionFromDifferentPrincipal(t *testing.T) {
+	const tokenOwner = "token-owner"
+	const tokenAttacker = "token-attacker"
+	validator := multiPrincipalValidator{
+		tokenOwner:    "agent:owner",
+		tokenAttacker: "agent:attacker",
+	}
+	upstream, fake := newFakeUpstreamServer()
+	t.Cleanup(func() { upstream.Close() })
+	gw := newHTTPTestGatewayWithValidator(t, upstream.URL, validator)
+
+	initReq := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	authorizeAs(initReq, tokenOwner)
+	initRec := httptest.NewRecorder()
+	gw.ServeHTTP(initRec, initReq)
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("initialize failed: status = %d, body = %s", initRec.Code, initRec.Body.String())
+	}
+	sessionID := initRec.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("expected a Mcp-Session-Id header on the initialize response")
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/mcp/jira/", nil)
+	authorizeAs(delReq, tokenAttacker)
+	delReq.Header.Set("Mcp-Session-Id", sessionID)
+	delRec := httptest.NewRecorder()
+	gw.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNotFound {
+		t.Fatalf("attacker DELETE status = %d, want %d, body = %s", delRec.Code, http.StatusNotFound, delRec.Body.String())
+	}
+	if got := fake.deleteCount("upstream-session-1"); got != 0 {
+		t.Fatalf("attacker's rejected DELETE must not reach the real upstream session, got %d calls", got)
+	}
+
+	ownReq := httptest.NewRequest(http.MethodPost, "/mcp/jira/", strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}}`))
+	authorizeAs(ownReq, tokenOwner)
+	ownReq.Header.Set("Mcp-Session-Id", sessionID)
+	ownRec := httptest.NewRecorder()
+	gw.ServeHTTP(ownRec, ownReq)
+	if ownRec.Code != http.StatusOK {
+		t.Fatalf("owner's session must survive the attacker's rejected DELETE: status = %d, body = %s", ownRec.Code, ownRec.Body.String())
 	}
 }
 

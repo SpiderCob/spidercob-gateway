@@ -445,7 +445,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess, ok := g.sessions.get(sessionID)
-	if !ok || sess.node != nodeName {
+	if !ok || sess.node != nodeName || sess.principal != claims.Subject {
+		// Same 404 whether the session doesn't exist, belongs to a
+		// different node, or belongs to a different principal -- a
+		// caller who authenticated for this node must never learn
+		// "that session exists, it's just not yours" (session hijack:
+		// without this check, any principal valid for nodeName could
+		// reuse another principal's live session just by obtaining its
+		// ID, since node+liveness were the only things checked here).
 		http.Error(sr, "session not found", http.StatusNotFound)
 		return
 	}
@@ -546,8 +553,16 @@ func (g *Gateway) handleDelete(w http.ResponseWriter, ctx context.Context, nodeN
 		http.Error(w, "missing Mcp-Session-Id", http.StatusBadRequest)
 		return
 	}
+	claims, _ := AuthClaimsFromContext(ctx) // always present -- authenticate() already ran before this is reached
 	sess, ok := g.sessions.get(sessionID)
-	if !ok || sess.node != nodeName {
+	if !ok || sess.node != nodeName || sess.principal != claims.Subject {
+		// Same hijack/DoS concern as the main dispatch path's session
+		// lookup: "a caller who authenticated against this node may
+		// always end their own session" (comment above ServeHTTP's
+		// DELETE branch) was never actually enforced -- any principal
+		// valid for nodeName could end *any* session on it. Same 404
+		// for not-found/wrong-node/wrong-principal, for the same
+		// non-disclosure reason.
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
