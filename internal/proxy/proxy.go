@@ -440,7 +440,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.enqueueAudit(claims, rpcMethod+":allowed", auditResource(nodeName, toolName))
-		g.handleNewSession(sr, r, nc)
+		g.handleNewSession(sr, r, nc, body, decision.BlockOnScanFlag)
 		return
 	}
 
@@ -461,7 +461,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.touch()
 	g.enqueueAudit(claims, rpcMethod+":allowed", auditResource(nodeName, toolName))
-	g.forward(sr, r, sess, false, rpcMethod, toolName)
+	g.forward(sr, r, sess, false, rpcMethod, toolName, body, decision.BlockOnScanFlag)
 }
 
 // authenticate validates the request's bearer token against nodeName. On
@@ -518,7 +518,7 @@ func bearerToken(authz string) (string, bool) {
 	return token, true
 }
 
-func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *nodeConfig) {
+func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *nodeConfig, body []byte, blockOnScanFlag bool) {
 	upstream, err := g.newUpstream(r.Context(), nc)
 	if err != nil {
 		switch {
@@ -538,7 +538,7 @@ func (g *Gateway) handleNewSession(w http.ResponseWriter, r *http.Request, nc *n
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	g.forward(w, r, sess, true, "initialize", "") // handleNewSession is only ever reached when rpcMethod == "initialize"
+	g.forward(w, r, sess, true, "initialize", "", body, blockOnScanFlag) // handleNewSession is only ever reached when rpcMethod == "initialize"
 }
 
 func (g *Gateway) handleDelete(w http.ResponseWriter, ctx context.Context, nodeName, sessionID string) {
@@ -615,12 +615,12 @@ func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstr
 // otherwise stream every tool straight through with only secret/PII
 // redaction applied, silently reopening exactly what that filtering
 // exists to close.
-func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string) {
+func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, body []byte, blockOnScanFlag bool) {
 	streamer, ok := sess.upstream.(streamingRoundTripper)
 	if !ok {
 		buf := newBufferedResponseWriter()
 		sess.upstream.ServeHTTP(buf, r)
-		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
 	}
 
@@ -634,11 +634,11 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	if rpcMethod == "tools/list" || !isSSEResponse(resp) {
 		buf := newBufferedResponseWriter()
 		writeUpstreamResponse(buf, resp)
-		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
 	}
 
-	g.forwardStreaming(w, r, sess, newSession, rpcMethod, toolName, resp)
+	g.forwardStreaming(w, r, sess, newSession, rpcMethod, toolName, resp, body, blockOnScanFlag)
 }
 
 // finishBufferedForward is today's original forward() body -- DLP-scan
@@ -655,13 +655,35 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 // unparseable "data: {...}" bytes and the unfiltered tool list would
 // reach the client after all, just through a different door than the
 // one already closed.
-func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod string, buf *bufferedResponseWriter) {
+func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, buf *bufferedResponseWriter, body []byte, blockOnScanFlag bool) {
 	clean, verdicts := g.scanners.ScanResponse(buf.body.Bytes())
 	for _, v := range verdicts {
 		metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "response", sess.node)
 		slog.Warn("scan verdict",
 			"scanner", v.Scanner, "action", v.Action.String(),
 			"direction", "response", "node", sess.node, "detail", v.Detail)
+	}
+
+	// Response-direction counterpart of the request-side block check
+	// (ServeHTTP, just before scanning the request body): the scan
+	// chain's own unconditional Block action, or any non-Allow verdict
+	// escalated by the matched ALLOW rule's block-on-scan-flag, must stop
+	// the response here -- before any of it (the whole buffered body is
+	// already in memory, nothing's been written to w yet) reaches the
+	// client. Previously this loop only logged/metriced verdicts and
+	// always delivered buf regardless of Action, so neither a hard Block
+	// nor block-on-scan-flag ever had any effect on a response -- the
+	// request-side gate's "escalate any non-Allow scan verdict on this
+	// specific call" (policy.Decision.BlockOnScanFlag's own doc comment)
+	// was silently one-directional.
+	for _, v := range verdicts {
+		if v.Action == scan.Block || (blockOnScanFlag && v.Action != scan.Allow) {
+			if claims, ok := AuthClaimsFromContext(r.Context()); ok {
+				g.enqueueAudit(claims, rpcMethod+":response_blocked_scan", auditResource(sess.node, toolName))
+			}
+			writeJSONRPCError(w, body, "response blocked by spidercob sanitization")
+			return
+		}
 	}
 
 	// tools/list itself is gated by the same method-level policy check
@@ -769,12 +791,12 @@ const streamCopyChunkSize = 32 * 1024
 // StreamScanner, it falls back to the safe pre-existing default --
 // buffer the whole thing and scan it in one pass -- rather than ever
 // forwarding streamed bytes with no scanning applied at all.
-func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, resp *http.Response) {
+func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, resp *http.Response, body []byte, blockOnScanFlag bool) {
 	window, ok := g.scanners.NewResponseWindow()
 	if !ok {
 		buf := newBufferedResponseWriter()
 		writeUpstreamResponse(buf, resp)
-		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, buf)
+		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
 	}
 
@@ -817,9 +839,32 @@ func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess 
 		}
 	}
 
+	// blockedByVerdict reports whether any verdict in vs requires stopping
+	// the stream here -- the same hard-Block-or-escalated-flag rule
+	// finishBufferedForward applies to a fully buffered response. Unlike
+	// the buffered path, this can only ever stop bytes *not yet
+	// written* -- the response's status line and headers are already
+	// committed to w by the time any scanning happens (streaming has to
+	// commit them before the body exists to scan at all), so a streamed
+	// response that trips this can't be turned into a clean 403 the way
+	// a buffered one can. The achievable guarantee here is narrower but
+	// still real: the flagged/blocked content itself is never flushed to
+	// the client, same as the size-cap truncation path just below
+	// already accepts "cut off early" as the right trade-off over
+	// "deliver all of it anyway."
+	blockedByVerdict := func(vs []scan.Verdict) bool {
+		for _, v := range vs {
+			if v.Action == scan.Block || (blockOnScanFlag && v.Action != scan.Allow) {
+				return true
+			}
+		}
+		return false
+	}
+
 	var allVerdicts []scan.Verdict
 	var total int
 	truncated := false
+	blockedScan := false
 	buf := make([]byte, streamCopyChunkSize)
 	for {
 		n, readErr := resp.Body.Read(buf)
@@ -834,16 +879,28 @@ func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess 
 			}
 			flushed, verdicts := window.Feed(buf[:n])
 			allVerdicts = append(allVerdicts, verdicts...)
+			if blockedByVerdict(verdicts) {
+				blockedScan = true
+				slog.Warn("streamed response blocked by scanning, terminating",
+					"node", sess.node, "rpc_method", rpcMethod)
+				break
+			}
 			writeAndFlush(flushed)
 		}
 		if readErr != nil {
 			break // EOF (normal end of stream) or a real read error -- either way, nothing more is coming.
 		}
 	}
-	if !truncated {
+	if !truncated && !blockedScan {
 		flushed, verdicts := window.Flush()
 		allVerdicts = append(allVerdicts, verdicts...)
-		writeAndFlush(flushed)
+		if blockedByVerdict(verdicts) {
+			blockedScan = true
+			slog.Warn("streamed response blocked by scanning, terminating",
+				"node", sess.node, "rpc_method", rpcMethod)
+		} else {
+			writeAndFlush(flushed)
+		}
 	}
 
 	for _, v := range allVerdicts {
@@ -856,6 +913,11 @@ func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess 
 	if truncated {
 		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
 			g.enqueueAudit(claims, rpcMethod+":stream_truncated", auditResource(sess.node, toolName))
+		}
+	}
+	if blockedScan {
+		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
+			g.enqueueAudit(claims, rpcMethod+":response_blocked_scan", auditResource(sess.node, toolName))
 		}
 	}
 }
