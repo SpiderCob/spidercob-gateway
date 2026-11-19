@@ -12,13 +12,12 @@ import (
 // constructor (already covered directly in internal/scan's tests).
 //
 // This is deliberately a construction-wiring check on the Gateway's
-// scanners field, not an HTTP-level test: a response-side Flag verdict
-// has no externally observable HTTP effect today -- block_on_scan_flag
-// only escalates REQUEST-side verdicts (proxy.go's tools/call gate), not
-// response-side ones (forward()'s response scanning only logs). That's
-// pre-existing scope from issue #7, not something this issue changes, so
-// there is no black-box HTTP behavior to assert on here -- the correct
-// seam for "did config reach the chain" is the chain itself.
+// scanners field, not an HTTP-level test -- the chain itself is the
+// right seam for "did config reach the chain." (Response-side
+// block-on-scan-flag escalation now does have an observable HTTP
+// effect -- see response_block_test.go -- but exercising that here
+// too would just duplicate those tests without adding coverage of
+// what this test is actually for: email/phone detection wiring.)
 func TestNew_ScanDetectEmailPhoneConfigReachesTheScanChain(t *testing.T) {
 	cases := []struct {
 		name        string
