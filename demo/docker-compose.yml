@@ -1,0 +1,10 @@
+# One-command demo: the gateway in front of a deliberately leaky MCP server.
+#   docker compose -f demo/docker-compose.yml up -d --build
+#   ./demo/try.sh
+# Demo credentials only -- never use this config for anything real.
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    ports: ["8080:8080"]

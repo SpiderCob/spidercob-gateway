@@ -47,3 +47,5 @@ echo
 "$script_dir/run-e2e-hot-reload.sh"
 echo
 "$script_dir/run-e2e-spidercob-admin.sh"
+echo
+"$script_dir/run-e2e-demo.sh"

@@ -12,9 +12,9 @@ reaches the agent, and the call appears in the tamper-evident audit log.*
 
 ## What it stops
 
-- **Leaks.** Secrets (AWS keys, tokens, high-entropy strings) and personal data (card numbers, SSNs, emails, phone
-  numbers) are redacted in tool responses before your agent sees them. Prompt-injection text hidden in responses,
-  including homoglyph and zero-width tricks, is flagged.
+- **Leaks.** Secrets (AWS keys, API tokens and other known formats), card numbers and SSNs are redacted in tool
+  responses before your agent sees them. Unknown high-entropy secrets and hidden prompt-injection text (including
+  homoglyph and zero-width tricks) are flagged, and your policy can block them. Email and phone detection is opt-in.
 - **Tool rug-pulls.** Every tool's definition is pinned the first time it's seen. If an MCP server quietly changes a
   tool later, the tool is quarantined and hidden until you approve it again.
 - **Anonymous agents.** No more shared static API keys: each agent gets its own short-lived, per-server token, and
@@ -22,10 +22,26 @@ reaches the agent, and the call appears in the tamper-evident audit log.*
 
 Every request, allowed or denied, lands in a hash-chained audit log. There's an admin UI at `/ui/`.
 
-## Try it
+## See it in 30 seconds
 
 ```bash
 git clone https://github.com/SpiderCob/spidercob-gateway && cd spidercob-gateway
+docker compose -f demo/docker-compose.yml up -d --build
+./demo/try.sh
+```
+
+A deliberately leaky MCP server returns a config file with a (fake) AWS key and a test card number. Your agent gets:
+
+```
+AWS_ACCESS_KEY_ID=[REDACTED:aws-access-key]
+BILLING_TEST_CARD=[REDACTED:credit-card]
+```
+
+Details in [demo/README.md](demo/README.md).
+
+## Use it with your own MCP servers
+
+```bash
 cp config.example.json config.json   # point "nodes" at your MCP servers
 ```
 
@@ -51,8 +67,6 @@ curl -s http://localhost:8080/token \
 ```
 
 Then point your MCP client at `http://localhost:8080/mcp/<node-name>` with `Authorization: Bearer <access_token>`.
-To see redaction work, put a fake AWS key (`AKIA` + 16 characters) in any tool response: it comes back as
-`[REDACTED:aws-access-key]`.
 
 No Docker? `make run` builds the admin UI and runs the gateway with your local Go toolchain (Go and Node.js needed).
 
