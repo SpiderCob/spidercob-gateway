@@ -69,8 +69,11 @@ func pinRPCCall(ctx context.Context, upstream sessionUpstream, body []byte) ([]b
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	buf := newBufferedResponseWriter()
+	buf := newBufferedResponseWriter(defaultMaxBufferedResponseBytes)
 	upstream.ServeHTTP(buf, req)
+	if buf.overflow {
+		return nil, errResponseTooLarge
+	}
 	if buf.status >= 300 {
 		return nil, fmt.Errorf("upstream returned status %d: %s", buf.status, buf.body.String())
 	}

@@ -126,6 +126,12 @@ type Gateway struct {
 	// test-only override" shape setAuditRecorder's capacity parameter
 	// already established for audit queue sizing.
 	maxStreamBytes int
+
+	// maxBufferedResponseBytes bounds a single buffered (non-SSE)
+	// response held in memory (security review finding #5) -- defaults
+	// to defaultMaxBufferedResponseBytes in New(); overridable only by
+	// this package's own tests, same shape as maxStreamBytes.
+	maxBufferedResponseBytes int
 }
 
 // New builds a Gateway. authn validates every request's bearer token
@@ -159,6 +165,8 @@ func New(cfg *config.Config, authn TokenValidator) (*Gateway, error) {
 		stopReaper:     make(chan struct{}),
 		reaperDone:     make(chan struct{}),
 		maxStreamBytes: defaultMaxStreamBytes,
+
+		maxBufferedResponseBytes: defaultMaxBufferedResponseBytes,
 	}
 	for _, n := range cfg.Nodes {
 		nc, err := buildNodeConfig(n)
@@ -633,7 +641,7 @@ func (g *Gateway) newUpstream(ctx context.Context, nc *nodeConfig) (sessionUpstr
 func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, body []byte, blockOnScanFlag bool) {
 	streamer, ok := sess.upstream.(streamingRoundTripper)
 	if !ok {
-		buf := newBufferedResponseWriter()
+		buf := newBufferedResponseWriter(g.maxBufferedResponseBytes)
 		sess.upstream.ServeHTTP(buf, r)
 		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
@@ -647,7 +655,7 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 	defer resp.Body.Close()
 
 	if rpcMethod == "tools/list" || !isSSEResponse(resp) {
-		buf := newBufferedResponseWriter()
+		buf := newBufferedResponseWriter(g.maxBufferedResponseBytes)
 		writeUpstreamResponse(buf, resp)
 		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
@@ -671,6 +679,15 @@ func (g *Gateway) forward(w http.ResponseWriter, r *http.Request, sess *mcpSessi
 // reach the client after all, just through a different door than the
 // one already closed.
 func (g *Gateway) finishBufferedForward(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, buf *bufferedResponseWriter, body []byte, blockOnScanFlag bool) {
+	if buf.overflow {
+		slog.Warn("buffered response exceeded size cap, rejecting",
+			"node", sess.node, "rpc_method", rpcMethod, "cap_bytes", buf.limit)
+		if claims, ok := AuthClaimsFromContext(r.Context()); ok {
+			g.enqueueAudit(claims, rpcMethod+":response_too_large", auditResource(sess.node, toolName))
+		}
+		writeJSONRPCError(w, body, "response exceeded spidercob size limit")
+		return
+	}
 	clean, verdicts := g.scanners.ScanResponse(buf.body.Bytes())
 	for _, v := range verdicts {
 		metrics.ScanVerdicts.Inc(v.Scanner, v.Action.String(), "response", sess.node)
@@ -793,6 +810,14 @@ func sseEventData(body []byte) []byte {
 // truncated-and-called-success: see forwardStreaming's truncated handling.
 const defaultMaxStreamBytes = 10 << 20 // 10 MiB
 
+// defaultMaxBufferedResponseBytes is the buffered (non-SSE) response
+// path's equivalent of defaultMaxStreamBytes (security review finding
+// #5): before it, that path copied an upstream body into memory with no
+// bound, so one bad node returning a multi-GB response could exhaust the
+// gateway's memory for every session. Over the cap, the response is
+// replaced by a JSON-RPC error and audited, never delivered truncated.
+const defaultMaxBufferedResponseBytes = 10 << 20 // 10 MiB
+
 // streamCopyChunkSize is how much is read from the upstream body per
 // Read call -- small enough that redacted content still reaches the
 // client promptly, large enough not to make regex matching per chunk
@@ -809,7 +834,7 @@ const streamCopyChunkSize = 32 * 1024
 func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess *mcpSession, newSession bool, rpcMethod, toolName string, resp *http.Response, body []byte, blockOnScanFlag bool) {
 	window, ok := g.scanners.NewResponseWindow()
 	if !ok {
-		buf := newBufferedResponseWriter()
+		buf := newBufferedResponseWriter(g.maxBufferedResponseBytes)
 		writeUpstreamResponse(buf, resp)
 		g.finishBufferedForward(w, r, sess, newSession, rpcMethod, toolName, buf, body, blockOnScanFlag)
 		return
@@ -939,20 +964,35 @@ func (g *Gateway) forwardStreaming(w http.ResponseWriter, r *http.Request, sess 
 
 // bufferedResponseWriter buffers a response in memory so it can be
 // rewritten (DLP-scanned, session headers added) before being flushed to
-// the real client.
+// the real client. limit > 0 caps how much it will hold (security review
+// finding #5): a Write that would go past it is refused with
+// errResponseTooLarge and sets overflow, which stops io.Copy from reading
+// any more of the upstream body.
 type bufferedResponseWriter struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
+	header   http.Header
+	status   int
+	body     bytes.Buffer
+	limit    int
+	overflow bool
 }
 
-func newBufferedResponseWriter() *bufferedResponseWriter {
-	return &bufferedResponseWriter{header: make(http.Header), status: http.StatusOK}
+// errResponseTooLarge is what a capped bufferedResponseWriter returns
+// once a response would exceed its limit.
+var errResponseTooLarge = errors.New("proxy: upstream response exceeds size limit")
+
+func newBufferedResponseWriter(limit int) *bufferedResponseWriter {
+	return &bufferedResponseWriter{header: make(http.Header), status: http.StatusOK, limit: limit}
 }
 
-func (b *bufferedResponseWriter) Header() http.Header         { return b.header }
-func (b *bufferedResponseWriter) WriteHeader(code int)        { b.status = code }
-func (b *bufferedResponseWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *bufferedResponseWriter) Header() http.Header  { return b.header }
+func (b *bufferedResponseWriter) WriteHeader(code int) { b.status = code }
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if b.overflow || (b.limit > 0 && b.body.Len()+len(p) > b.limit) {
+		b.overflow = true
+		return 0, errResponseTooLarge
+	}
+	return b.body.Write(p)
+}
 
 // httpUpstreamSession is a streamable_http node's per-session upstream.
 // Each request is forwarded with the real upstream's own session ID
