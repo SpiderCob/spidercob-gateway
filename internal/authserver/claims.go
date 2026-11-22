@@ -44,6 +44,9 @@ var (
 	ErrTokenWrongIssuer      = errors.New("authserver: wrong issuer")
 	ErrTokenWrongAudience    = errors.New("authserver: wrong audience")
 	ErrTokenRevoked          = errors.New("authserver: token revoked")
+	// ErrSubjectCheckFailed: the live revocation check for the token's
+	// subject couldn't be completed (store error); the token is rejected.
+	ErrSubjectCheckFailed = errors.New("authserver: could not verify token subject")
 )
 
 // parseAndVerify parses tokenString, checks its signature against ks, and
