@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -122,6 +123,11 @@ type AuthServer struct {
 	idpTrust *idptrust.TrustStore // nil means Mode B is disabled entirely
 	keys     *KeySet
 	denylist *denylist
+	// store is read on every validation to check, live, that an agent
+	// subject hasn't been revoked since its token was minted (security
+	// review finding #4) -- the jti denylist alone can't cover this, since
+	// revoking an agent doesn't know which jtis it holds.
+	store store.Store
 
 	// nodesMu guards nodes -- unguarded before issue #57, when it was
 	// only ever written once, during New, before any HTTP handler could
@@ -176,6 +182,7 @@ func New(ctx context.Context, cfg Config) (*AuthServer, error) {
 		keys:                      keys,
 		nodes:                     nodes,
 		denylist:                  dl,
+		store:                     cfg.Store,
 		nhiTTL:                    cfg.NHITokenTTL,
 		humanTTL:                  cfg.HumanTokenTTL,
 		sessionTTL:                cfg.LocalSessionTTL,
@@ -273,6 +280,9 @@ func (a *AuthServer) ValidateAccessToken(node, tokenString string) (Claims, erro
 	if a.denylist.isRevoked(claims.ID) {
 		return Claims{}, ErrTokenRevoked
 	}
+	if err := a.checkSubjectLive(claims.Subject); err != nil {
+		return Claims{}, err
+	}
 	return *claims, nil
 }
 
@@ -297,7 +307,41 @@ func (a *AuthServer) ValidateAdminAccessToken(tokenString string) (Claims, error
 	if a.denylist.isRevoked(claims.ID) {
 		return Claims{}, ErrTokenRevoked
 	}
+	if err := a.checkSubjectLive(claims.Subject); err != nil {
+		return Claims{}, err
+	}
 	return *claims, nil
+}
+
+// subjectCheckTimeout bounds the live store read on the validation hot
+// path, so a stalled store fails requests closed quickly instead of
+// hanging them.
+const subjectCheckTimeout = 2 * time.Second
+
+// checkSubjectLive enforces agent revocation on every request (security
+// review finding #4): store.RevokeAgent only sets RevokedAt, so without
+// this an already-issued token kept validating for its whole TTL. A token
+// whose agent is revoked or no longer exists is ErrTokenRevoked; a store
+// error fails closed too (ErrSubjectCheckFailed) rather than letting the
+// token through unchecked. Non-agent subjects (users) are unaffected.
+func (a *AuthServer) checkSubjectLive(subject string) error {
+	clientID, ok := strings.CutPrefix(subject, "agent:")
+	if !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), subjectCheckTimeout)
+	defer cancel()
+	agent, err := a.store.GetAgentByClientID(ctx, clientID)
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrTokenRevoked
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSubjectCheckFailed, err)
+	}
+	if agent.RevokedAt != nil {
+		return ErrTokenRevoked
+	}
+	return nil
 }
 
 // RevokeJTI immediately denylists jti (design doc: revoked tokens rejected
